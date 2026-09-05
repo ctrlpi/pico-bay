@@ -1,0 +1,52 @@
+{
+  "name": "@ctrlpi/pico-bay",
+  "version": "0.9.23",
+  "description": "A Web App and MCP Server for managing MicroPython and CircuitPython boards, such as the Raspberry Pi Pico, over USB.",
+  "keywords": [
+    "raspberry-pi-pico",
+    "raspberry-pico",
+    "pi-pico",
+    "pico",
+    "micropython",
+    "circuitpython",
+    "mcp",
+    "model-context-protocol",
+    "serial",
+    "repl",
+    "cli",
+    "ctrlpi"
+  ],
+  "license": "MIT",
+  "author": "ctrlPi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ctrlpi/pico-bay.git"
+  },
+  "homepage": "https://github.com/ctrlpi/pico-bay#readme",
+  "bugs": {
+    "url": "https://github.com/ctrlpi/pico-bay/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "commonjs",
+  "bin": {
+    "pico-bay": "pico-bay.js"
+  },
+  "main": "pico-bay.js",
+  "files": [
+    "pico-bay.js",
+    "page.html",
+    "README.md",
+    "test.js",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node pico-bay.js",
+    "dev": "node --watch --watch-path=pico-bay.js --watch-path=page.html pico-bay.js --no-open",
+    "test": "node --test --test-reporter=./test.js test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

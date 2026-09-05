@@ -1,0 +1,2153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pico-bay</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    color: #1f2328;
+    background: #ffffff;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Top bar (brand · board pills · storage · reset) ── */
+  #topbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+    padding: 8px 16px;
+  }
+  #topbar .brand { font-weight: 600; font-size: 14px; color: #1f2328; margin-right: 4px; white-space: nowrap; text-decoration: none; }
+  #pills { display: inline-flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  #pills .no-board { font-size: 11px; line-height: 21px; color: #656d76; transform: translateY(1px); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500; color: #24292f;
+    background: #fff; border: 1px solid rgba(31,35,40,0.15);
+    border-radius: 999px; padding: 4px 12px; cursor: pointer; line-height: 18px;
+    white-space: nowrap;
+  }
+  .pill:hover { background: #f3f4f6; border-color: rgba(31,35,40,0.3); }
+  .pill.active { background: #ddf4ff; border-color: #54aeff; color: #0969da; }
+  .pill.micropython { border-color: rgba(9,105,218,0.4); }
+  .pill.micropython .pico-icon { color: #0969da; }
+  .pill.circuitpython { border-color: rgba(188,76,0,0.45); }
+  .pill.circuitpython .pico-icon { color: #bc4c00; }
+  .pill.bootsel { color: #cf222e; background: #ffebe9; border-color: rgba(207,34,46,0.5); }
+  .pill.bad { color: #cf222e; border-color: rgba(207,34,46,0.4); }
+  .pill .serial { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                  font-size: 11px; color: #57606a; }
+  .pill .readonly { font-size: 9px; color: #8250df; text-transform: uppercase; letter-spacing: .03em; }
+  .pill.active .serial { color: #0969da; }
+  .pill .pico-icon {
+    width: 15px; height: 15px; flex: 0 0 auto; color: #656d76;
+    position: relative; top: -1px;
+    fill: none; stroke: currentColor; stroke-width: 2.2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .pill.bad .pico-icon, .pill.bootsel .pico-icon { color: #cf222e; }
+
+  #spacer { flex: 1; }
+  #storage { font-size: 11px; color: #57606a; white-space: nowrap; display: none; }
+  #storage.visible { display: block; }
+  #storage .bar {
+    display: inline-block; width: 54px; height: 6px; border-radius: 3px;
+    background: #d0d7de; overflow: hidden; vertical-align: middle; margin: 0 5px;
+    cursor: pointer;
+  }
+  #storage .bar:hover { box-shadow: 0 0 0 2px #ddf4ff; }
+  #storage .bar i { display: block; height: 100%; background: #0969da; }
+
+  #connection-status {
+    position: relative;
+    display: none;
+    flex: 0 0 auto;
+    padding: 8px 16px;
+    background: #ffebe9;
+    border-bottom: 1px solid #ff8182;
+    color: #82071e;
+    font-size: 13px;
+    font-weight: 500;
+    text-align: center;
+  }
+  #connection-status.visible { display: block; }
+  #connection-status.mount-warning { color: #7d4e00; background: #fff8c5; border-bottom-color: #d4a72c; }
+  #connection-status code { padding: 1px 4px; border-radius: 4px; background: rgba(207,34,46,0.1); }
+  #connection-status-close {
+    display: none; position: absolute; top: 50%; right: 12px; transform: translateY(-50%);
+    padding: 2px 6px; border: 0; border-radius: 4px; cursor: pointer;
+    color: #82071e; background: transparent; font-size: 18px; line-height: 18px;
+  }
+  #connection-status-close:hover { background: rgba(207,34,46,0.12); }
+  #connection-status.mount-warning #connection-status-close { color: #7d4e00; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 500; color: #24292f; line-height: 18px;
+    background: #fff; border: 1px solid rgba(31,35,40,0.15);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; flex-shrink: 0;
+  }
+  .btn:hover:not(:disabled) { background: #f3f4f6; border-color: rgba(31,35,40,0.3); }
+  .btn:active:not(:disabled) { background: #eaeef2; transform: translateY(1px); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.icon { width: 28px; height: 28px; padding: 0; justify-content: center; }
+  .btn.icon svg { pointer-events: none; }
+  #refresh-btn { background: transparent; border-color: transparent; }
+  #refresh-btn:hover:not(:disabled) { background: transparent; border-color: transparent; color: #0969da; }
+  #refresh-btn.refreshing { background: transparent; border-color: transparent; color: #0969da; opacity: 1; }
+  #refresh-btn.refreshing svg { animation: refresh-spin 700ms linear infinite; }
+  @keyframes refresh-spin { to { transform: rotate(360deg); } }
+  .btn.primary { background: #1f883d; border-color: rgba(31,35,40,0.15); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #1a7f37; }
+  .btn.del { color: #cf222e; }
+  .btn.del:hover:not(:disabled) { background: #ffebe9; border-color: #cf222e; color: #cf222e; }
+  .file.drop-target { background: #ddf4ff; outline: 2px dashed #0969da; }
+
+  /* ── Menu & Dropdowns ── */
+  #menuwrap, #movewrap { position: relative; }
+  #menu, .dropdown-menu {
+    display: none; position: absolute; right: 0; top: 30px; z-index: 30;
+    background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(140,149,159,0.2); padding: 4px; min-width: 190px;
+  }
+  #menu.open, .dropdown-menu.open { display: block; }
+  #menu button, #menu a, .dropdown-menu button {
+    display: block; width: 100%; text-align: left; font-size: 12px; color: #1f2328;
+    background: none; border: 0; border-radius: 4px; padding: 6px 10px; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none;
+  }
+  #menu button:hover, #menu a:hover, .dropdown-menu button:hover { background: #f3f4f6; }
+  #menu button:disabled { color: #8c959f; cursor: not-allowed; }
+  #menu button:disabled:hover { background: none; }
+  #menu button.danger, .dropdown-menu button.danger { color: #cf222e; }
+  #menu button.danger:hover, .dropdown-menu button.danger:hover { background: #ffebe9; }
+  #menu button.menu-toggle { display: flex; align-items: center; justify-content: space-between; }
+  #menu .menu-label-detail { font-size: 10px; color: #57606a; }
+  #menu .menu-checkmark { color: #0969da; flex: 0 0 auto; transition: opacity 120ms ease; }
+  #menu .menu-checkmark path { stroke-width: 2.6; }
+  #menu .menu-toggle.showing .menu-checkmark { opacity: 0; }
+  #menu .menu-state-icons { position: relative; width: 14px; height: 14px; flex: 0 0 14px; }
+  #menu .menu-state-icons svg { position: absolute; inset: 0; transition: opacity 120ms ease; }
+  #menu .menu-off { color: #cf222e; }
+  #menu .menu-toggle:not(.showing) .menu-off { opacity: 0; }
+  #menu hr, .dropdown-menu hr { border: 0; border-top: 1px solid #d0d7de; margin: 4px 0; }
+
+  #app-dialog {
+    width: min(420px, calc(100vw - 32px));
+    margin: auto;
+    border: 1px solid #d0d7de;
+    border-radius: 10px;
+    background: #fff;
+    color: #1f2328;
+    box-shadow: 0 16px 48px rgba(31,35,40,0.25);
+    padding: 0;
+  }
+  #app-dialog::backdrop { background: rgba(31,35,40,0.38); }
+  #dialog-form { padding: 20px; }
+  #dialog-title { font-size: 16px; line-height: 1.3; margin-bottom: 8px; }
+  #dialog-message { color: #57606a; font-size: 13px; white-space: pre-line; }
+  #dialog-message a { color: #0969da; text-decoration: none; }
+  #dialog-message a:hover { text-decoration: underline; }
+  #dialog-input {
+    display: none; width: 100%; margin-top: 14px; padding: 7px 10px;
+    border: 1px solid #d0d7de; border-radius: 6px; font: inherit; font-size: 13px; outline: none;
+  }
+  #dialog-input.visible { display: block; }
+  #dialog-input:focus { border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,0.2); }
+  #dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+  #dialog-footer { margin-right: auto; color: #57606a; font-size: 12px; }
+  #dialog-footer a { color: #0969da; text-decoration: none; }
+  #dialog-footer a:hover { text-decoration: underline; }
+  #dialog-confirm.dialog-danger { background: #cf222e; border-color: #cf222e; color: #fff; }
+  #dialog-confirm.dialog-danger:hover { background: #a40e26; }
+
+  /* ── Layout ── */
+  #main { flex: 1; display: flex; min-height: 0; }
+
+  #sidebar {
+    flex: 0 0 28%;
+    min-width: 180px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #fff;
+  }
+  #dragbar {
+    flex: 0 0 5px;
+    cursor: col-resize;
+    background: #d0d7de;
+    border-left: 1px solid #d0d7de;
+  }
+  #dragbar:hover, #dragbar.dragging { background: #0969da; }
+  #main.bootsel-mode #sidebar, #main.bootsel-mode #dragbar, #main.bootsel-mode #console { display: none; }
+  #main.bootsel-mode #placeholder { justify-content: flex-start; padding-top: 48px; box-sizing: border-box; }
+
+  #search-wrap { padding: 10px; border-bottom: 1px solid #d0d7de; display: flex; gap: 6px; }
+  #search {
+    flex: 1; min-width: 0; font-size: 13px; padding: 6px 10px;
+    border: 1px solid #d0d7de; border-radius: 6px; outline: none;
+  }
+  #search:focus { border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,0.2); }
+
+  #filelist { flex: 1; overflow-y: auto; }
+  #filelist.dropping { background: #ddf4ff; outline: 2px dashed #54aeff; outline-offset: -6px; }
+  #upload-hint {
+    padding: 8px 12px;
+    border-top: 1px solid #d0d7de;
+    color: #8c959f;
+    font-size: 11px;
+    text-align: center;
+  }
+
+  .file {
+    position: relative;
+    padding: 8px 12px;
+    border-bottom: 1px solid #eaeef2;
+    cursor: pointer;
+  }
+  .file:hover { background: #f6f8fa; }
+  .file.active { background: #ddf4ff; }
+  .file .frow { display: flex; align-items: baseline; gap: 6px; }
+  .file .fname {
+    font-size: 13px; font-weight: 600; color: #1f2328; flex: 0 1 auto; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .file.dir .fname { color: #0969da; }
+  .file .fmeta { font-size: 11px; color: #8c959f; margin-left: auto; flex: 0 0 auto;
+                 white-space: nowrap; padding-right: 44px; }
+  .file .fmeta span + span::before { content: ' · '; }
+  .file .twist { flex: 0 0 11px; color: #8c959f; font-size: 8px; line-height: 18px; }
+  .file .fdir { font-size: 11px; color: #8c959f; }
+
+  /* Reveal row actions on hover. */
+  .file .acts { position: absolute; top: 5px; right: 8px; display: none; gap: 2px; }
+  .file:hover .acts { display: flex; }
+  .file .acts button {
+    display: flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; padding: 0; cursor: pointer;
+    background: #fff; border: 1px solid rgba(31,35,40,0.15); border-radius: 4px; color: #57606a;
+  }
+  .file .acts button:hover { background: #f3f4f6; color: #24292f; }
+  .file .acts button.del { color: #cf222e; }
+  .file .acts button.del:hover { background: #ffebe9; border-color: #cf222e; color: #cf222e; }
+
+  #empty { padding: 24px; text-align: center; color: #8c959f; font-size: 13px; line-height: 1.6; }
+
+  /* ── Viewer ── */
+  #right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+  #toolbar {
+    flex: 0 0 auto;
+    display: none;
+    align-items: center;
+    gap: 8px;
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
+    padding: 8px 16px;
+  }
+  #toolbar.visible { display: flex; }
+  #toolbar .filename {
+    flex: 1; font-size: 13px; color: #57606a; font-weight: 500; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #toolbar .filename b { color: #1f2328; font-weight: 600; }
+  #dirty { font-size: 11px; color: #9a6700; background: #fff8c5; border: 1px solid #d4a72c55;
+           border-radius: 999px; padding: 1px 8px; display: none; }
+  #dirty.on { display: inline-block; }
+
+  #scroll { flex: 1; overflow: auto; min-height: 0; }
+  #placeholder {
+    height: 100%; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; color: #8c959f;
+  }
+  #placeholder p { font-size: 18px; font-weight: 600; color: #57606a; }
+  #placeholder small { font-size: 13px; }
+  #bootsel-options { display: none; gap: 12px; margin: 28px 0; }
+  #bootsel-options.visible { display: flex; }
+  #bootsel-options button { min-width: 180px; justify-content: center; padding: 8px 14px; }
+  #bootsel-options .standard-choice { color: #fff; background: #2da44e; border-color: #2da44e; }
+  #bootsel-options .standard-choice:hover:not(:disabled) { background: #278b42; border-color: #278b42; }
+  #bootsel-options .wifi-choice { color: #fff; background: #218bff; border-color: #218bff; }
+  #bootsel-options .wifi-choice:hover:not(:disabled) { background: #1f7ae0; border-color: #1f7ae0; }
+  #bootsel-options svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+  #bootsel-options.mount-help { flex-direction: column; align-items: center; }
+  .mount-command { display: flex; align-items: center; gap: 8px; }
+  .mount-command code { padding: 9px 12px; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }
+  #bootsel-options .mount-command button { min-width: auto; }
+  #bootsel-options .mount-command button svg { width: 16px; height: 16px; }
+  #bootsel-options.mount-help > [data-retry-firmware] { margin-top: 12px; }
+  #bootsel-source { display: none; }
+  #bootsel-source.visible { display: block; }
+  #bootsel-source a { color: #0969da; }
+
+  /* Keep wrapped text beside its source line number. */
+  #viewer { display: none; flex-direction: column; min-height: 100%; }
+  #code { flex: 1 0 auto; display: grid; grid-template-columns: max-content minmax(0, 1fr);
+          align-content: start; grid-auto-rows: max-content;
+          position: relative;
+          background: linear-gradient(to right,
+            #f6f8fa 0, #f6f8fa var(--gutter-width, 0px),
+            #fff var(--gutter-width, 0px), #fff 100%);
+          font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+          font-size: 12.5px; line-height: 1.55; }
+  .code-row { display: contents; }
+  .line-no {
+    text-align: right; padding: 0 10px; color: #8c959f;
+    background: #f6f8fa; border-right: 1px solid #d0d7de; user-select: none;
+    white-space: pre; position: sticky; left: 0;
+  }
+  .line-src { min-width: 0; padding: 0 16px; white-space: pre; tab-size: 4; }
+  .code-row:first-child .line-no, .code-row:first-child .line-src { padding-top: 16px; }
+  .code-row:last-child .line-no, .code-row:last-child .line-src { padding-bottom: 60px; }
+  /* Wrap long lines on wider screens. */
+  @media (min-width: 700px) {
+    .line-src { white-space: pre-wrap; overflow-wrap: anywhere; }
+  }
+  #editor {
+    display: none; width: 100%; height: 100%; border: 0; outline: none; resize: none;
+    padding: 16px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.55; tab-size: 4; color: #1f2328; background: #fff;
+  }
+  #binary { display: none; padding: 40px; text-align: center; color: #57606a; font-size: 14px; }
+
+  /* Python and JSON highlighting. */
+  .tok-kw  { color: #cf222e; }
+  .tok-str { color: #0a3069; }
+  .tok-com { color: #6e7781; font-style: italic; }
+  .tok-num { color: #0550ae; }
+  .tok-dec { color: #8250df; }
+  .tok-key { color: #0550ae; }
+
+  /* GitHub-style Markdown. */
+  #md, #readme-content { max-width: 800px; margin: 0 auto; padding: 32px 32px 80px; }
+  #md { display: none; }
+  #readme-screen { display: none; flex: 1; min-height: 0; overflow: auto; background: #fff; }
+  #readme-content { width: 100%; }
+  #md h1, #md h2, #readme-content h1, #readme-content h2 { padding-bottom: 0.3em; border-bottom: 1px solid #d0d7de; }
+  #md h1, #readme-content h1 { font-size: 2em; margin: 0.67em 0; font-weight: 600; }
+  #md h2, #readme-content h2 { font-size: 1.5em; margin-top: 24px; margin-bottom: 16px; font-weight: 600; }
+  #md h3, #readme-content h3 { font-size: 1.25em; margin-top: 24px; margin-bottom: 16px; font-weight: 600; }
+  #md p, #readme-content p { margin-top: 0; margin-bottom: 16px; }
+  #md a, #readme-content a { color: #0969da; text-decoration: none; }
+  #md a:hover, #readme-content a:hover { text-decoration: underline; }
+  #md code, #readme-content code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 85%;
+             padding: 0.2em 0.4em; background: rgba(175,184,193,0.2); border-radius: 6px; }
+  #md pre, #readme-content pre { font-size: 85%; line-height: 1.45; background: #f6f8fa; border-radius: 6px;
+            padding: 16px; overflow-x: auto; margin-bottom: 16px; }
+  #md pre code, #readme-content pre code { background: transparent; padding: 0; }
+  #md ul, #md ol, #readme-content ul, #readme-content ol { margin-top: 0; margin-bottom: 16px; padding-left: 2em; }
+  #md blockquote, #readme-content blockquote { margin: 0 0 16px; padding: 0 1em; color: #57606a; border-left: 4px solid #d0d7de; }
+  #md table, #readme-content table { border-collapse: collapse; margin-bottom: 16px; }
+  #md table th, #md table td, #readme-content table th, #readme-content table td { padding: 6px 13px; border: 1px solid #d0d7de; }
+  #md img, #readme-content img { max-width: 100%; vertical-align: middle; }
+  #readme-content table.options-table { width: 100%; table-layout: fixed; }
+  #readme-content table.options-table th:first-child,
+  #readme-content table.options-table td:first-child { width: 20%; white-space: nowrap; }
+  #readme-content table.options-table th:nth-child(2),
+  #readme-content table.options-table td:nth-child(2) { width: 20%; }
+  #readme-content table.options-table th:nth-child(3),
+  #readme-content table.options-table td:nth-child(3) { width: 13%; }
+  #readme-content table.options-table th:nth-child(4),
+  #readme-content table.options-table td:nth-child(4) { width: 47%; }
+
+  /* ── Console drawer ── */
+  #console { flex: 0 0 auto; display: flex; flex-direction: column; border-top: 1px solid #d0d7de;
+             background: #f6f8fa; max-height: calc(100% - 100px); min-height: 0; overflow: hidden; }
+  #console.open { flex-basis: var(--console-height, 35%); }
+  #console:not(.open) { flex-basis: auto !important; }
+  #console-resize {
+    display: none; flex: 0 0 7px; cursor: row-resize;
+    background: #d0d7de; touch-action: none;
+  }
+  #console.open #console-resize { display: block; }
+  #console-resize:hover, #console-resize.dragging { background: #0969da; }
+  #conhead { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer;
+             flex: 0 0 auto; user-select: none; }
+  #conhead .t { font-size: 12px; font-weight: 600; color: #1f2328; }
+  #conhead .chev { font-size: 8px; color: #57606a; width: 11px; }
+  #conhead .sp { flex: 1; }
+  #conbody { display: none; flex-direction: column; min-height: 0; overflow: hidden; background: #fff; }
+  #console.open #conbody { display: flex; flex: 1; }
+  #conout {
+    flex: 1; overflow-y: auto; height: 0; min-height: 0; padding: 10px 16px; margin: 0;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #1f2328;
+  }
+  #conout .e { color: #cf222e; }
+  #conout .s { color: #6e7781; }
+  #conin-wrap { flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+                border-top: 1px solid #eaeef2; padding: 6px 16px; }
+  #conin-wrap .p { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #8c959f; }
+  #conin {
+    flex: 1; border: 0; outline: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; color: #1f2328; background: transparent;
+  }
+
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #1f2328; color: #fff; font-size: 13px; padding: 8px 16px;
+    border-radius: 6px; z-index: 100; opacity: 0; pointer-events: none;
+    transition: opacity 0.2s; max-width: 70vw;
+  }
+  #toast.show { opacity: 1; }
+  #toast.bad { background: #cf222e; }
+  #toast.good { background: #1a7f37; }
+  #hover-tooltip {
+    position: fixed; z-index: 300; display: none; pointer-events: none;
+    max-width: min(320px, calc(100vw - 16px)); padding: 5px 9px;
+    color: #24292f; background: #fff;
+    border: 1px solid rgba(31,35,40,0.15); border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(31,35,40,0.15);
+    font-size: 12px; line-height: 18px; white-space: normal;
+  }
+  #busy {
+    position: fixed; top: 0; left: 0; height: 2px; width: 100%; z-index: 200;
+    background: linear-gradient(90deg, transparent, #0969da, transparent);
+    background-size: 40% 100%; background-repeat: no-repeat; display: none;
+    animation: slide 1s linear infinite;
+  }
+  #busy.on { display: block; }
+  @keyframes slide { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+</style>
+</head>
+<body>
+
+<div id="busy"></div>
+
+<div id="topbar">
+  <a class="brand" href="/" title="Reload Pico Bay">pico-bay</a>
+  <span id="pills"></span>
+  <button class="btn icon" id="refresh-btn" onclick="refreshDevices(this)" title="Scan USB for connected boards">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
+  </button>
+  <span id="spacer"></span>
+  <span id="storage"></span>
+  <span id="menuwrap">
+    <button class="btn icon" id="menu-btn" onclick="toggleMenu(event)" title="More actions" disabled>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM1.5 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm13 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/></svg>
+    </button>
+    <div id="menu">
+      <button class="requires-write" onclick="pickUpload()">Upload files…</button>
+      <button class="requires-write" onclick="pickUploadFolder()">Upload folder…</button>
+      <hr>
+      <button class="requires-write" onclick="newFile()">New file…</button>
+      <button class="requires-write" onclick="newFolder()">New folder…</button>
+      <hr>
+      <button class="requires-device" onclick="downloadAll()">Download ZIP</button>
+      <button class="requires-write" onclick="pickRestore()">Restore from ZIP…</button>
+      <hr>
+      <button class="menu-toggle" id="hide-system-files" onclick="toggleSystemFiles()"
+        aria-pressed="true"><span>Hide system files</span><svg class="menu-checkmark" aria-hidden="true"
+          width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8.5 6.5 12 13 4.5"
+          stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="menu-toggle showing" id="mcp-toggle" onclick="toggleMcp()" aria-pressed="false">
+        <span>MCP <span class="menu-label-detail">over Streamable HTTP</span></span>
+        <span class="menu-state-icons" id="mcp-status" aria-hidden="true">
+          <svg class="menu-checkmark" width="14" height="14" viewBox="0 0 16 16" fill="none"><path
+            d="M3 8.5 6.5 12 13 4.5" stroke="currentColor" stroke-linecap="round"
+            stroke-linejoin="round"/></svg>
+          <svg class="menu-off" width="14" height="14" viewBox="0 0 16 16" fill="none"><path
+            d="M8 1.75v5M4.3 3.7a5.25 5.25 0 1 0 7.4 0" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round"/></svg>
+        </span>
+      </button>
+      <hr>
+      <button class="requires-device" onclick="doInterrupt()">Interrupt (Ctrl-C)</button>
+      <button class="requires-device" onclick="doReset(false)">Soft reset (restart)</button>
+      <button class="requires-device" onclick="doReset(true)">Hard reset (reconnect)</button>
+      <hr>
+      <button class="danger requires-write" onclick="doClean()">Delete all files…</button>
+      <hr>
+      <button onclick="showReadme()">README.md</button>
+      <a href="https://www.raspberrypi.com/documentation/microcontrollers/micropython.html"
+        target="_blank" rel="noopener noreferrer">MicroPython documentation ↗</a>
+      <a href="https://docs.circuitpython.org/en/latest/README.html"
+        target="_blank" rel="noopener noreferrer">CircuitPython documentation ↗</a>
+      <button onclick="showAbout()">About Pico Bay…</button>
+    </div>
+  </span>
+</div>
+
+<div id="connection-status" role="status" aria-live="polite">
+  <span id="connection-status-message">Connection to the Pico Bay server was lost. Check that the server is still running; reconnecting automatically…</span>
+  <button id="connection-status-close" type="button" aria-label="Dismiss warning" title="Dismiss warning">×</button>
+</div>
+
+<div id="main">
+  <div id="sidebar">
+    <div id="search-wrap">
+      <input id="search" type="text" placeholder="Filter files…" autocomplete="off">
+      <button class="btn icon" onclick="newFile()" title="New file" id="new-btn" disabled>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.75 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 7.75 2Z"/></svg>
+      </button>
+      <button class="btn icon" onclick="newFolder()" title="New folder" id="new-folder-btn" disabled>
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3A.75.75 0 0 1 2.5 2.25h3.879a.75.75 0 0 1 .53.22l1.122 1.122a.75.75 0 0 0 .53.22H13.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-.75.75H2.5a.75.75 0 0 1-.75-.75V3Zm1.5.75v7.75h10.5V4.5H8.56a2.25 2.25 0 0 1-1.591-.659L5.848 2.75H3.25Z"/></svg>
+      </button>
+    </div>
+    <div id="filelist"></div>
+  </div>
+
+  <div id="dragbar" title="Drag to resize"></div>
+
+  <div id="right">
+    <div id="toolbar">
+      <span class="filename" id="filename"></span>
+      <span id="dirty">unsaved</span>
+      <button class="btn icon" id="run-btn" onclick="runFile()" title="Run this file on the board">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4.25 2.5a.75.75 0 0 1 1.14-.64l7.5 5.5a.75.75 0 0 1 0 1.28l-7.5 5.5a.75.75 0 0 1-1.14-.64Z"/></svg>
+      </button>
+      <button class="btn icon" id="download-btn" onclick="downloadFile()" title="Download to this computer">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06ZM1.75 11a.75.75 0 0 1 .75.75v1.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25v-1.5a.75.75 0 0 1 .75-.75Z"/></svg>
+      </button>
+      <button class="btn icon" id="edit-btn" onclick="startEdit()" title="Edit this file">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z"/></svg>
+      </button>
+      <button class="btn icon" id="rename-btn" onclick="renameCurrentFile()" title="Rename this file">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h7c2.5 0 4 1.2 4 3.5 0 1.7-1 2.8-2.5 3.3L14 14h-2.3l-2.7-5.2H4V14H2Zm2 2v4h5c1.2 0 2-.6 2-2s-.8-2-2-2H4Z"/></svg>
+      </button>
+      <span id="movewrap" style="position:relative">
+        <button class="btn icon" id="move-btn" onclick="toggleMoveMenu(event)" title="Move to folder…">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3A.75.75 0 0 1 2.5 2.25h3.879a.75.75 0 0 1 .53.22l1.122 1.122a.75.75 0 0 0 .53.22H13.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-.75.75H2.5a.75.75 0 0 1-.75-.75V3Zm1.5.75v7.75h10.5V4.5H8.56a2.25 2.25 0 0 1-1.591-.659L5.848 2.75H3.25Z"/></svg>
+        </button>
+        <div id="move-menu" class="dropdown-menu"></div>
+      </span>
+      <button class="btn del icon" id="del-btn" onclick="deleteCurrentFile()" title="Delete this file">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.75 1.75 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15Z"/></svg>
+      </button>
+      <button class="btn icon" id="format-json-btn" onclick="formatJSON()" title="Format JSON with 3-space indentation" aria-label="Format JSON" style="display:none">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3.25A.75.75 0 0 1 2.5 2.5h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1-.75-.75Zm4 0a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm-4 4.75a.75.75 0 0 1 .75-.75h1a.75.75 0 0 1 0 1.5h-1A.75.75 0 0 1 1.75 8Zm4 0a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7A.75.75 0 0 1 5.75 8Zm-4 4.75A.75.75 0 0 1 2.5 12h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1-.75-.75Zm4 0A.75.75 0 0 1 6.5 12h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z"/></svg>
+      </button>
+      <button class="btn primary icon" id="save-btn" onclick="saveEdit()" title="Save changes" aria-label="Save changes" style="display:none">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 1h8.19c.464 0 .909.184 1.237.513l2.31 2.31c.329.328.513.773.513 1.237v8.19A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25V2.75C1 1.784 1.784 1 2.75 1ZM2.5 2.75v10.5c0 .138.112.25.25.25h.75v-4A1.5 1.5 0 0 1 5 8h6a1.5 1.5 0 0 1 1.5 1.5v4h.75a.25.25 0 0 0 .25-.25V5.06L11.94 3.5H11v1A1.5 1.5 0 0 1 9.5 6h-4A1.5 1.5 0 0 1 4 4.5v-2H2.75a.25.25 0 0 0-.25.25ZM5.5 2.5v2h4v-2h-4Zm-.5 7v4h6v-4H5Z"/></svg>
+      </button>
+      <button class="btn icon" id="cancel-btn" onclick="cancelEdit()" title="Cancel editing" aria-label="Cancel editing" style="display:none">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>
+      </button>
+    </div>
+
+    <div id="scroll">
+      <div id="placeholder">
+        <svg width="42" height="42" viewBox="0 0 16 16" fill="#8c959f"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>
+        <p id="ph-title">Select a board</p>
+        <small id="ph-sub">Plug a Pico into USB and pick its pill above</small>
+        <div id="bootsel-options"></div>
+        <small id="bootsel-source">Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a></small>
+      </div>
+      <div id="viewer">
+        <div id="code"></div>
+        <textarea id="editor" spellcheck="false"></textarea>
+        <div id="md"></div>
+        <div id="binary"></div>
+      </div>
+    </div>
+
+    <div id="console">
+      <div id="console-resize" title="Drag to resize console"></div>
+      <div id="conhead" onclick="toggleConsole()">
+        <span class="chev" id="conchev">▶</span>
+        <span class="t">Console</span>
+        <span class="sp"></span>
+        <button class="btn del icon" onclick="event.stopPropagation(); doInterrupt()" title="Stop running code (Ctrl-C)" aria-label="Stop running code">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M3.75 2h8.5C13.216 2 14 2.784 14 3.75v8.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Z"/></svg>
+        </button>
+        <button class="btn icon" onclick="event.stopPropagation(); clearConsole()" title="Clear console" aria-label="Clear console">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.75 1.25 7.1 8.9"/><path d="m5.65 7.85 2.9 2.15-2.05 4.5H1.25Z"/><path d="m3.05 11.7-.7 1.7M4.65 11.85l-.45 2.3M6.15 12.05l-.25 1.8"/></svg>
+        </button>
+      </div>
+      <div id="conbody">
+        <pre id="conout"></pre>
+        <div id="conin-wrap">
+          <span class="p">&gt;&gt;&gt;</span>
+          <input id="conin" placeholder="Run a Python line on the board…" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="readme-screen"><article id="readme-content"></article></div>
+
+<input type="file" id="fileinput" multiple style="display:none">
+<input type="file" id="folderinput" webkitdirectory directory multiple style="display:none">
+<input type="file" id="restoreinput" accept=".zip,application/zip" style="display:none">
+<div id="toast"></div>
+<div id="hover-tooltip" role="tooltip"></div>
+<dialog id="app-dialog">
+  <form id="dialog-form">
+    <h2 id="dialog-title"></h2>
+    <p id="dialog-message"></p>
+    <input id="dialog-input" autocomplete="off">
+    <div id="dialog-actions">
+      <span id="dialog-footer"></span>
+      <button class="btn" type="button" id="dialog-cancel">Cancel</button>
+      <button class="btn primary" type="submit" id="dialog-confirm">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  var pillsEl   = document.getElementById('pills');
+  var listEl    = document.getElementById('filelist');
+  var searchEl  = document.getElementById('search');
+  var storageEl = document.getElementById('storage');
+  var toolbar   = document.getElementById('toolbar');
+  var viewer    = document.getElementById('viewer');
+  var placeholder = document.getElementById('placeholder');
+  var phTitle   = document.getElementById('ph-title');
+  var phSub     = document.getElementById('ph-sub');
+  var bootselOptionsEl = document.getElementById('bootsel-options');
+  var bootselSourceEl = document.getElementById('bootsel-source');
+  var filenameEl = document.getElementById('filename');
+  var codeEl    = document.getElementById('code');
+  var mdEl      = document.getElementById('md');
+  var binEl     = document.getElementById('binary');
+  var editorEl  = document.getElementById('editor');
+  var scrollEl  = document.getElementById('scroll');
+  var dirtyEl   = document.getElementById('dirty');
+  var consoleEl = document.getElementById('console');
+  var conOut    = document.getElementById('conout');
+  var conIn     = document.getElementById('conin');
+  var conChev   = document.getElementById('conchev');
+  var consoleResize = document.getElementById('console-resize');
+  var toastEl   = document.getElementById('toast');
+  var hoverTooltipEl = document.getElementById('hover-tooltip');
+  var busyEl    = document.getElementById('busy');
+  var connectionStatusEl = document.getElementById('connection-status');
+  var connectionStatusMessageEl = document.getElementById('connection-status-message');
+  var connectionStatusCloseEl = document.getElementById('connection-status-close');
+  var appDialog = document.getElementById('app-dialog');
+  var dialogForm = document.getElementById('dialog-form');
+  var dialogTitle = document.getElementById('dialog-title');
+  var dialogMessage = document.getElementById('dialog-message');
+  var dialogInput = document.getElementById('dialog-input');
+  var dialogCancel = document.getElementById('dialog-cancel');
+  var dialogConfirm = document.getElementById('dialog-confirm');
+  var dialogFooter = document.getElementById('dialog-footer');
+  var fileInput = document.getElementById('fileinput');
+  var folderInput = document.getElementById('folderinput');
+  var restoreInput = document.getElementById('restoreinput');
+  var hideSystemFilesButton = document.getElementById('hide-system-files');
+  var mcpToggleButton = document.getElementById('mcp-toggle');
+  var menuEl    = document.getElementById('menu');
+  var mainScreenEl = document.getElementById('main');
+  var readmeScreenEl = document.getElementById('readme-screen');
+  var readmeContentEl = document.getElementById('readme-content');
+
+  var devices = [];
+  var curDev  = null;
+  var allFiles = [];
+  var loadedSystemFiles = false;
+  var curFile = null;      // { path, size, text, binary }
+  var editing = false;
+  var collapsed = {};      // dir path -> true when folded shut
+  var evtSource = null;
+  var inflight = 0;
+  var devicesLoading = false;
+  var serverConnected = null;
+  var serverInstance = null;
+  var hostWarning = null;
+  var hostWarningDismissed = false;
+  var hostWarningDismissTimer = null;
+  var mountWarning = null;
+  var mountWarningDismissed = false;
+  var usbAutomountSetupAvailable = false;
+  var mcpEnabled = false;
+  var dialogResolve = null;
+  var dialogHasInput = false;
+  var consoleControlBuffer = '';
+  var hideSystemFiles = true;
+
+  // Shared tooltip for static and dynamic controls.
+  var tooltipTarget = null;
+  function showHoverTooltip(target) {
+    var message = target.getAttribute('data-tooltip') || target.getAttribute('title');
+    if (!message) return;
+    if (target.hasAttribute('title')) {
+      target.setAttribute('data-tooltip', message);
+      target.removeAttribute('title');
+    }
+    tooltipTarget = target;
+    hoverTooltipEl.textContent = message;
+    hoverTooltipEl.style.display = 'block';
+    var targetRect = target.getBoundingClientRect();
+    var tipRect = hoverTooltipEl.getBoundingClientRect();
+    var left = targetRect.left + (targetRect.width - tipRect.width) / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tipRect.width - 8));
+    var top = targetRect.bottom + 7;
+    if (top + tipRect.height > window.innerHeight - 8) top = targetRect.top - tipRect.height - 7;
+    hoverTooltipEl.style.left = Math.round(left) + 'px';
+    hoverTooltipEl.style.top = Math.max(8, Math.round(top)) + 'px';
+  }
+  function hideHoverTooltip() {
+    tooltipTarget = null;
+    hoverTooltipEl.style.display = 'none';
+  }
+  document.addEventListener('mouseover', function (e) {
+    var target = e.target.closest('[title], [data-tooltip]');
+    if (target && target !== tooltipTarget) showHoverTooltip(target);
+  });
+  document.addEventListener('mouseout', function (e) {
+    if (tooltipTarget && !tooltipTarget.contains(e.relatedTarget)) hideHoverTooltip();
+  });
+  document.addEventListener('focusin', function (e) {
+    var target = e.target.closest('[title], [data-tooltip]');
+    if (target) showHoverTooltip(target);
+  });
+  document.addEventListener('focusout', hideHoverTooltip);
+  window.addEventListener('scroll', hideHoverTooltip, true);
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function toast(msg, bad, duration, good) {
+    toastEl.textContent = msg;
+    toastEl.className = 'show' + (bad ? ' bad' : good ? ' good' : '');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { toastEl.className = ''; }, duration || (bad ? 5000 : 2200));
+  }
+
+  function setMcpEnabled(enabled) {
+    mcpEnabled = !!enabled;
+    mcpToggleButton.classList.toggle('showing', !mcpEnabled);
+    mcpToggleButton.setAttribute('aria-pressed', String(mcpEnabled));
+  }
+
+  async function toggleMcp() {
+    var enabled = !mcpEnabled;
+    setMcpEnabled(enabled);
+    toast(enabled ? 'Enabling MCP' : 'Disabling MCP', !enabled, 3000, enabled);
+    mcpToggleButton.disabled = true;
+    try {
+      var res = await serverFetch('/api/mcp?enabled=' + (enabled ? '1' : '0'), { method: 'POST' });
+      if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
+      var data = await res.json();
+      setMcpEnabled(data.enabled);
+    } catch (e) {
+      setMcpEnabled(!enabled);
+      toast('Could not change MCP: ' + e.message, true);
+    } finally {
+      mcpToggleButton.disabled = false;
+    }
+  }
+
+  function showDialog(options) {
+    dialogTitle.textContent = options.title || 'Confirm';
+    if (options.messageHTML) dialogMessage.innerHTML = options.messageHTML;
+    else dialogMessage.textContent = options.message || '';
+    dialogHasInput = Object.prototype.hasOwnProperty.call(options, 'value');
+    dialogInput.classList.toggle('visible', dialogHasInput);
+    dialogInput.value = dialogHasInput ? options.value : '';
+    dialogConfirm.textContent = options.confirmLabel || 'OK';
+    dialogConfirm.className = 'btn ' + (options.danger ? 'dialog-danger' : 'primary');
+    dialogFooter.innerHTML = options.footerHTML || '';
+    dialogFooter.style.display = options.footerHTML ? '' : 'none';
+    dialogCancel.style.display = options.cancel === false ? 'none' : '';
+    appDialog.showModal();
+    if (dialogHasInput) {
+      dialogInput.focus();
+      dialogInput.select();
+    } else if (options.defaultCancel) {
+      dialogCancel.focus();
+    } else {
+      dialogConfirm.focus();
+    }
+    return new Promise(function (resolve) { dialogResolve = resolve; });
+  }
+
+  function finishDialog(confirmed) {
+    if (!dialogResolve) return;
+    var resolve = dialogResolve;
+    dialogResolve = null;
+    var result = confirmed ? (dialogHasInput ? dialogInput.value : true) : (dialogHasInput ? null : false);
+    appDialog.close();
+    resolve(result);
+  }
+
+  function confirmDialog(message, options) {
+    options = options || {};
+    options.message = message;
+    return showDialog(options);
+  }
+
+  function promptDialog(message, value, options) {
+    options = options || {};
+    options.message = message;
+    options.value = value || '';
+    return showDialog(options);
+  }
+
+  dialogForm.addEventListener('submit', function (e) { e.preventDefault(); finishDialog(true); });
+  dialogCancel.addEventListener('click', function () { finishDialog(false); });
+  appDialog.addEventListener('cancel', function (e) { e.preventDefault(); finishDialog(false); });
+
+  function updateStatusBanner() {
+    var disconnected = !serverConnected;
+    var warning = !disconnected && !hostWarningDismissed ? hostWarning : null;
+    var unmounted = !disconnected && !warning && !mountWarningDismissed ? mountWarning : null;
+    if (disconnected) {
+      connectionStatusMessageEl.textContent = 'Connection to the Pico Bay server was lost. Check that the server is still running; reconnecting automatically…';
+    } else if (warning) {
+      connectionStatusMessageEl.innerHTML = '<strong>Raspberry Pi undervoltage was detected</strong> <code>' +
+        esc(warning.code.replace(/^throttled=/, '')) + '</code>. ' + esc(warning.message);
+    } else if (unmounted) {
+      connectionStatusMessageEl.innerHTML = 'CircuitPython storage is not mounted. Run <code>' +
+        esc(unmounted) + '</code> on the Pi to enable write access.' +
+        (usbAutomountSetupAvailable
+          ? ' Run <code>usb-automount.sh</code> once to configure your Pi to automount Pico storage.' : '');
+    } else connectionStatusMessageEl.textContent = '';
+    connectionStatusEl.classList.toggle('visible', disconnected || !!warning || !!unmounted);
+    connectionStatusEl.classList.toggle('mount-warning', !!unmounted);
+    connectionStatusCloseEl.style.display = serverConnected && (warning || unmounted) ? 'block' : 'none';
+  }
+
+  function setHostWarning(nextWarning) {
+    var changed = (!hostWarning !== !nextWarning) || (hostWarning && nextWarning &&
+      (hostWarning.code !== nextWarning.code || hostWarning.current !== nextWarning.current));
+    if (changed) {
+      hostWarningDismissed = false;
+      clearTimeout(hostWarningDismissTimer);
+      hostWarningDismissTimer = null;
+    }
+    hostWarning = nextWarning;
+    if (changed && hostWarning && !hostWarning.current) {
+      hostWarningDismissTimer = setTimeout(function () {
+        hostWarningDismissed = true;
+        hostWarningDismissTimer = null;
+        updateStatusBanner();
+      }, 10000);
+    }
+    updateStatusBanner();
+  }
+
+  function setMountWarning(command) {
+    if (command !== mountWarning) mountWarningDismissed = false;
+    mountWarning = command;
+    updateStatusBanner();
+  }
+
+  connectionStatusCloseEl.addEventListener('click', function () {
+    if (hostWarning && !hostWarningDismissed) hostWarningDismissed = true;
+    else mountWarningDismissed = true;
+    updateStatusBanner();
+  });
+
+  function setServerConnected(connected) {
+    if (connected === serverConnected) return;
+    var wasDisconnected = serverConnected === false;
+    serverConnected = connected;
+    updateStatusBanner();
+    if (!connected) {
+      setEnabled(false);
+    } else {
+      setEnabled(!!curDev);
+      if (wasDisconnected) toast('Reconnected to the Pico Bay server');
+    }
+  }
+
+  async function serverFetch(path, opts) {
+    try {
+      var res = await fetch(path, opts);
+      setServerConnected(true);
+      return res;
+    } catch (e) {
+      setServerConnected(false);
+      throw new Error('Cannot reach the Pico Bay server. Check that it is still running; reconnecting automatically.');
+    }
+  }
+
+  function humanSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  // Hide timestamps from boards without a valid RTC.
+  function whenText(secs) {
+    if (!secs || secs < 100000) return '—';
+    var d = new Date(secs * 1000);
+    if (d.getFullYear() < 2001) return '—';
+    var diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.round(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
+    if (diff < 2592000) return Math.round(diff / 86400) + 'd ago';
+    return d.toISOString().slice(0, 10);
+  }
+
+  // Apply shared progress and error handling.
+  async function api(path, opts, deviceOverride) {
+    opts = opts || {};
+    var requestDev = deviceOverride === undefined ? curDev : deviceOverride;
+    inflight++; busyEl.classList.add('on');
+    try {
+      var sep = path.indexOf('?') === -1 ? '?' : '&';
+      var res = await serverFetch(path + sep + 'dev=' + encodeURIComponent(requestDev), opts);
+      var ct = res.headers.get('content-type') || '';
+      if (ct.indexOf('application/json') === -1) {
+        if (!res.ok) throw new Error(await res.text());
+        return res;
+      }
+      var data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Request failed');
+      return data;
+    } finally {
+      if (--inflight === 0) busyEl.classList.remove('on');
+    }
+  }
+
+  // ── Boards ──
+  function currentDevice() {
+    return devices.find(function (d) { return d.dev === curDev; }) || null;
+  }
+
+  function canWrite() {
+    var device = currentDevice();
+    return !!device && device.ok && device.readOnly === false;
+  }
+
+  function canUseConsole() {
+    var device = currentDevice();
+    return !!device && device.ok && device.capabilities && device.capabilities.console;
+  }
+
+  function canRunFiles() {
+    var device = currentDevice();
+    return !!device && device.ok && device.capabilities && device.capabilities.run;
+  }
+
+  function requireWriteAccess() {
+    if (canWrite()) return true;
+    var device = currentDevice();
+    toast(device && device.readOnly
+      ? (device.firmwareLabel || 'This device') + ' is currently read-only'
+      : 'No writable device is selected', true);
+    return false;
+  }
+
+  function requireConsoleAccess() {
+    if (canUseConsole()) return true;
+    toast('Console input is not available for this device', true);
+    return false;
+  }
+
+  function renderPills() {
+    if (!devices.length) {
+      pillsEl.innerHTML = '<span class="no-board">no board connected</span>';
+      return;
+    }
+    var picoIcon = '<svg class="pico-icon" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<rect x="6" y="6" width="12" height="12" rx="2"></rect>' +
+      '<circle cx="9" cy="9" r="0.9" fill="currentColor" stroke="none"></circle>' +
+      '<path d="M9 18v3M15 18v3M6 9H3M6 15H3M21 9h-3M21 15h-3"></path></svg>';
+    pillsEl.innerHTML = devices.map(function (d) {
+      var details = d.bootMode
+        ? 'BOOTSEL firmware-install mode. Reconnect the board normally to use pico-bay.'
+        : d.ok ? [
+        d.machine || d.label,
+        (d.firmwareLabel || 'MicroPython') + (d.release ? ' ' + d.release : ''),
+        'Serial ' + (d.uid || d.serial),
+        d.readOnly ? 'READ-ONLY' : ''
+      ].filter(Boolean).join(' · ') : d.error;
+      var firmwareClass = d.bootMode ? ' bootsel' : d.firmware === 'circuitpython' ? ' circuitpython' :
+        d.firmware === 'micropython' ? ' micropython' : '';
+      return '<button class="pill' + firmwareClass + (d.dev === curDev ? ' active' : '') + (d.ok ? '' : ' bad') +
+        '" data-dev="' + esc(d.dev) + '" title="' + esc(details) + '">' +
+        picoIcon + esc(d.label) +
+        (d.bootMode ? '<span class="serial">BOOTSEL</span>' : '<span class="serial">' + esc(d.serial) + '</span>') +
+        (d.readOnly && !d.bootMode ? '<span class="readonly">RO</span>' : '') + '</button>';
+    }).join('');
+  }
+
+  async function loadDevices(manual) {
+    if (devicesLoading) return;
+    devicesLoading = true;
+    try {
+      var res = await serverFetch('/api/devices' + (manual ? '?manual=1' : ''));
+      if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
+      var data = await res.json();
+      if (serverInstance && data.serverInstance !== serverInstance) { location.reload(); return; }
+      serverInstance = data.serverInstance;
+      usbAutomountSetupAvailable = !!data.usbAutomountSetupAvailable;
+      setMcpEnabled(data.mcpEnabled);
+      setHostWarning(data.hostWarning || null);
+      var before = devices.map(function (d) { return d.dev; }).join(',');
+      devices = data.devices;
+      var selectedDevice = currentDevice();
+      setMountWarning(selectedDevice ? selectedDevice.mountCommand : null);
+      setEnabled(!!curDev && !!currentDevice() && !currentDevice().bootMode);
+      var now = devices.map(function (d) { return d.dev; }).join(',');
+      if (curDev && !devices.some(function (d) { return d.dev === curDev; })) {
+        curDev = null; closeConsoleStream(); resetView();
+        setEnabled(false);
+        phTitle.textContent = 'Board disconnected';
+        phSub.textContent = 'Reconnect it, or pick another pill';
+        listEl.innerHTML = '';
+        storageEl.classList.remove('visible');
+      }
+      if (before !== now) renderPills();
+      var firstUsable = devices.find(function (d) { return !d.bootMode; });
+      if (!curDev && firstUsable) selectDev(firstUsable.dev);
+      else renderPills();
+    } catch (e) {
+      // Keep the last state until polling succeeds.
+    } finally {
+      devicesLoading = false;
+    }
+  }
+
+  async function refreshDevices(button) {
+    if (!button || button.classList.contains('refreshing')) return;
+    exitReadme();
+    button.classList.add('refreshing');
+    button.disabled = true;
+    try {
+      await Promise.all([
+        loadDevices(true),
+        new Promise(function (resolve) { setTimeout(resolve, 350); }),
+      ]);
+    } catch (e) {
+      toast('Refresh failed: ' + e.message, true);
+    } finally {
+      button.classList.remove('refreshing');
+      button.disabled = false;
+    }
+  }
+
+  function setEnabled(on) {
+    document.getElementById('menu-btn').disabled = false;
+    document.querySelectorAll('.requires-device').forEach(function (el) { el.disabled = !on; });
+    ['new-btn', 'new-folder-btn'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.disabled = !on || !canWrite();
+    });
+    document.querySelectorAll('.requires-write').forEach(function (el) {
+      el.disabled = !on || !canWrite();
+    });
+    conIn.disabled = !on || !canUseConsole();
+    conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
+  }
+
+  async function selectDev(dev) {
+    if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
+      title: 'Discard changes?', confirmLabel: 'Discard', danger: true
+    })) return;
+    exitReadme();
+    curDev = dev;
+    var selectedDevice = currentDevice();
+    setMountWarning(selectedDevice ? selectedDevice.mountCommand : null);
+    loadedSystemFiles = false;
+    editing = false;
+    renderPills();
+    if (selectedDevice && selectedDevice.bootMode) {
+      closeConsoleStream();
+      setEnabled(false);
+      resetView();
+      mainEl.classList.add('bootsel-mode');
+      listEl.innerHTML = '';
+      storageEl.classList.remove('visible');
+      phTitle.textContent = selectedDevice.machine + ' BOOTSEL mode';
+      phSub.textContent = 'Choose the board model to install the latest MicroPython firmware';
+      var choices = selectedDevice.machine === 'RP2040'
+        ? [['pico', 'Raspberry Pi Pico', false], ['pico-w', 'Raspberry Pi Pico W', true]]
+        : [['pico2', 'Raspberry Pi Pico 2', false], ['pico2-w', 'Raspberry Pi Pico 2 W', true]];
+      bootselOptionsEl.innerHTML = choices.map(function (choice) {
+        var wifi = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10.5a10 10 0 0 1 14 0M8.5 14a5 5 0 0 1 7 0M12 18h.01"></path></svg>';
+        return '<button class="btn ' + (choice[2] ? 'wifi-choice' : 'standard-choice') + '" data-firmware="' + choice[0] + '">' +
+          (choice[2] ? wifi : '') + esc(choice[1]) + '</button>';
+      }).join('');
+      bootselOptionsEl.classList.add('visible');
+      bootselSourceEl.classList.add('visible');
+      return;
+    }
+    setEnabled(true);
+    resetView();
+    phTitle.textContent = 'Select a file';
+    phSub.textContent = canWrite()
+      ? 'Files on this board are listed on the left'
+      : 'CircuitPython support is currently read-only';
+    openConsoleStream();
+    await loadFiles();
+  }
+
+  pillsEl.addEventListener('click', function (e) {
+    var b = e.target.closest('.pill');
+    if (b) selectDev(b.dataset.dev);
+  });
+
+  async function copyText(text, button) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+      else {
+        var input = document.createElement('textarea');
+        input.value = text;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+      }
+      button.title = 'Copied';
+      setTimeout(function () { button.title = 'Copy'; }, 1400);
+    } catch (error) { toast('Could not copy the command', true); }
+  }
+
+  function showBootselMountHelp(error, firmwareId, firmwareName) {
+    var match = /Run "([^"]+)" on the Pi/.exec(error.message);
+    if (!match) return false;
+    var command = match[1];
+    phTitle.textContent = 'Mount permission required';
+    phSub.textContent = 'Raspberry Pi OS detected the BOOTSEL volume but did not mount it. Run this command on the Pi, then select Proceed.';
+    bootselSourceEl.classList.remove('visible');
+    bootselOptionsEl.className = 'visible mount-help';
+    bootselOptionsEl.innerHTML = '<div class="mount-command"><code>' + esc(command) + '</code>' +
+      '<button class="btn" data-copy-command="' + esc(command) + '" title="Copy" aria-label="Copy">' +
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect>' +
+      '<path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg></button></div>' +
+      '<button class="btn primary" data-retry-firmware="' + esc(firmwareId) + '" data-firmware-name="' +
+      esc(firmwareName) + '">Proceed</button>';
+    return true;
+  }
+
+  async function installBootselChoice(firmwareId, firmwareName, confirmFirst) {
+    var device = currentDevice();
+    if (!device || !device.bootMode) return;
+    if (confirmFirst) {
+      var confirmed = await confirmDialog(
+        'This will download the latest MicroPython firmware for ' + firmwareName +
+        ', install it on the connected board, and reboot it. It should then appear as a normal device.',
+        { title: 'Install MicroPython?', confirmLabel: 'Download and install', defaultCancel: true }
+      );
+      if (!confirmed) return;
+    }
+    bootselOptionsEl.querySelectorAll('button').forEach(function (item) { item.disabled = true; });
+    phTitle.textContent = 'Downloading and installing MicroPython…';
+    phSub.textContent = 'Keep the board connected. It will reboot automatically.';
+    try {
+      var result = await api('/api/bootsel/install?firmware=' + encodeURIComponent(firmwareId), {
+        method: 'POST'
+      });
+      phTitle.textContent = 'MicroPython installed';
+      phSub.textContent = result.firmware + ' was installed. Waiting for the board to reboot and reconnect…';
+      setTimeout(function () { loadDevices(true); }, 1200);
+    } catch (error) {
+      if (!showBootselMountHelp(error, firmwareId, firmwareName)) {
+        phTitle.textContent = 'Installation failed';
+        phSub.textContent = error.message;
+        bootselOptionsEl.querySelectorAll('button').forEach(function (item) { item.disabled = false; });
+        toast(error.message, true);
+      }
+    }
+  }
+
+  bootselOptionsEl.addEventListener('click', async function (e) {
+    var copyButton = e.target.closest('[data-copy-command]');
+    if (copyButton) { await copyText(copyButton.dataset.copyCommand, copyButton); return; }
+    var retryButton = e.target.closest('[data-retry-firmware]');
+    if (retryButton) {
+      await installBootselChoice(retryButton.dataset.retryFirmware, retryButton.dataset.firmwareName, false);
+      return;
+    }
+    var button = e.target.closest('[data-firmware]');
+    if (!button || !curDev) return;
+    await installBootselChoice(button.dataset.firmware, button.textContent.trim(), true);
+  });
+
+  // ── File list ──
+  async function loadFiles() {
+    if (!curDev) return;
+    var requestedDev = curDev;
+    try {
+      var includeSystemFiles = !hideSystemFiles;
+      var data = await api('/api/files' + (includeSystemFiles ? '?system=1' : ''), {}, requestedDev);
+      if (requestedDev !== curDev) return;
+      allFiles = data.files;
+      loadedSystemFiles = loadedSystemFiles || includeSystemFiles;
+      renderStorage(data.stats);
+      renderList();
+    } catch (e) {
+      if (requestedDev !== curDev) return;
+      listEl.innerHTML = '<div id="empty">Could not read the board.<br><span style="color:#cf222e">' +
+        esc(e.message) + '</span></div>';
+    }
+  }
+
+  function renderStorage(s) {
+    var device = currentDevice();
+    var firmware = device && device.ok
+      ? (device.firmwareLabel || '') + (device.release ? ' ' + device.release : '')
+      : '';
+    if (!s) {
+      storageEl.textContent = firmware;
+      storageEl.classList.toggle('visible', !!firmware);
+      return;
+    }
+    var flashUsed = s.fsTotal - s.fsFree;
+    var flashPct = s.fsTotal ? Math.round((flashUsed / s.fsTotal) * 100) : 0;
+    var flashUsedText = humanSize(flashUsed);
+    var flashTotalText = humanSize(s.fsTotal);
+    var ramTotal = s.memFree + s.memAlloc;
+    var ramPct = ramTotal ? Math.round((s.memAlloc / ramTotal) * 100) : 0;
+    var ramUsedText = humanSize(s.memAlloc);
+    var ramTotalText = humanSize(ramTotal);
+    storageEl.innerHTML = (firmware ? esc(firmware) + ' · ' : '') +
+      'RAM <span class="bar" title="' + ramUsedText + ' / ' + ramTotalText +
+      '"><i style="width:' + ramPct + '%"></i></span>' +
+      ' Flash <span class="bar" title="' + flashUsedText + ' / ' + flashTotalText +
+      '"><i style="width:' + flashPct + '%"></i></span>';
+    storageEl.classList.add('visible');
+  }
+
+  // Hidden because an ancestor folder is folded shut.
+  function isHidden(p) {
+    var parts = p.split('/');
+    for (var i = 1; i < parts.length; i++) {
+      if (collapsed[parts.slice(0, i).join('/')]) return true;
+    }
+    return false;
+  }
+
+  function renderList() {
+    var q = searchEl.value.trim().toLowerCase();
+    var uploadHint = canWrite() ? 'Drop files here to upload' : 'CircuitPython - READ-ONLY';
+    var rows = allFiles;
+    if (hideSystemFiles) rows = rows.filter(function (f) {
+      return !f.path.split('/').some(function (part) { return part.charAt(0) === '.'; });
+    });
+    if (q) rows = rows.filter(function (f) { return !f.isDir && f.path.toLowerCase().indexOf(q) !== -1; });
+    else rows = rows.filter(function (f) { return !isHidden(f.path); });
+
+    if (!rows.length) {
+      listEl.innerHTML = '<div id="empty">' + (q ? 'No file matches that filter' : 'This board has no files') + '</div>' +
+        '<div id="upload-hint">' + uploadHint + '</div>';
+      return;
+    }
+
+    listEl.innerHTML = rows.map(function (f) {
+      var depth = q ? 0 : f.path.split('/').length - 1;
+      var meta = f.isDir
+        ? ''
+        : '<span class="fmeta"><span>' + humanSize(f.size) + '</span><span>' + esc(whenText(f.mtime)) + '</span></span>';
+      var twist = f.isDir ? '<span class="twist">' + (collapsed[f.path] ? '▶' : '▼') + '</span>' : '';
+      var subdir = q && f.dir ? ' <span class="fdir">' + esc(f.dir) + '/</span>' : '';
+      var acts = '<span class="acts">' +
+          (f.isDir ? '<button title="New file in folder" data-act="new-file">' +
+              '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M3 1.75C3 .784 3.784 0 4.75 0h4.836c.464 0 .909.184 1.237.513l1.664 1.664c.329.328.513.773.513 1.237V7.25a.75.75 0 0 1-1.5 0V4H9.75A1.75 1.75 0 0 1 8 2.25V1.5H4.75a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25H7.5a.75.75 0 0 1 0 1.5H4.75A1.75 1.75 0 0 1 3 14.25Zm7.5.81v-.75l.94.94h-.69a.25.25 0 0 1-.25-.25ZM11.75 9a.75.75 0 0 1 .75.75V11h1.25a.75.75 0 0 1 0 1.5H12.5v1.25a.75.75 0 0 1-1.5 0V12.5H9.75a.75.75 0 0 1 0-1.5H11V9.75a.75.75 0 0 1 .75-.75Z"/></svg></button>' +
+              '<button title="New folder in folder" data-act="new-folder">' +
+              '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 2A1.75 1.75 0 0 0 0 3.75v8.5C0 13.216.784 14 1.75 14H7.5a.75.75 0 0 0 0-1.5H1.75a.25.25 0 0 1-.25-.25v-7.5h13v2.5a.75.75 0 0 0 1.5 0v-3.5A1.75 1.75 0 0 0 14.25 2H8.81a.25.25 0 0 1-.177-.073L7.22.513A1.75 1.75 0 0 0 5.982 0H1.75Zm0-.5h4.232a.25.25 0 0 1 .177.073L7.086 2.5H1.5v-.75a.25.25 0 0 1 .25-.25ZM11.75 9a.75.75 0 0 1 .75.75V11h1.25a.75.75 0 0 1 0 1.5H12.5v1.25a.75.75 0 0 1-1.5 0V12.5H9.75a.75.75 0 0 1 0-1.5H11V9.75a.75.75 0 0 1 .75-.75Z"/></svg></button>' +
+              '<button title="Rename folder" data-act="rename">' +
+              '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z"/></svg></button>' : '') +
+            '<button class="del" title="Delete ' + (f.isDir ? 'folder' : 'file') + '" data-act="delete">' +
+              '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.75 1.75 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15Z"/></svg></button>' +
+          '</span>';
+      if (!canWrite()) acts = '';
+      return '<div class="file' + (f.isDir ? ' dir' : '') + (f.path === (curFile && curFile.path) ? ' active' : '') +
+        '" data-path="' + esc(f.path) + '" data-dir="' + (f.isDir ? '1' : '') + '"' +
+        ' draggable="' + (!f.isDir ? 'true' : 'false') + '"' +
+        ' style="padding-left:' + (12 + depth * 14) + 'px">' +
+        '<div class="frow">' + twist +
+          '<span class="fname">' + esc(f.name) + (f.isDir ? '/' : '') + '</span>' + subdir + meta +
+        '</div>' + acts +
+        '</div>';
+    }).join('') + '<div id="upload-hint">' + uploadHint + '</div>';
+  }
+
+  listEl.addEventListener('click', function (e) {
+    var row = e.target.closest('.file');
+    if (!row) return;
+    var act = e.target.closest('[data-act]');
+    var p = row.dataset.path;
+    if (act) {
+      e.stopPropagation();
+      var what = act.dataset.act;
+      if (what === 'delete') deletePath(p, row.dataset.dir === '1');
+      else if (what === 'rename') renamePath(p);
+      else if (what === 'new-file') newFile(p);
+      else if (what === 'new-folder') newFolder(p);
+      else downloadPath(p);
+      return;
+    }
+    if (row.dataset.dir === '1') {
+      collapsed[p] = !collapsed[p];
+      renderList();
+    } else {
+      openFile(p);
+    }
+  });
+
+  searchEl.addEventListener('input', renderList);
+
+  // ── Viewing ──
+  function resetView() {
+    curFile = null;
+    editing = false;
+    viewer.style.display = 'none';
+    placeholder.style.display = 'flex';
+    toolbar.classList.remove('visible');
+    dirtyEl.classList.remove('on');
+    bootselOptionsEl.classList.remove('visible');
+    bootselOptionsEl.classList.remove('mount-help');
+    bootselOptionsEl.innerHTML = '';
+    bootselSourceEl.classList.remove('visible');
+    document.title = 'pico-bay';
+    mainEl.classList.remove('bootsel-mode');
+  }
+
+  async function openFile(p) {
+    if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
+      title: 'Discard changes?', confirmLabel: 'Discard', danger: true
+    })) return;
+    try {
+      var data = await api('/api/file?path=' + encodeURIComponent(p));
+      curFile = data;
+      editing = false;
+      showFile();
+      document.querySelectorAll('.file').forEach(function (el) {
+        el.classList.toggle('active', el.dataset.path === p);
+      });
+    } catch (e) { toast(e.message, true); }
+  }
+
+  function showFile() {
+    var f = curFile;
+    placeholder.style.display = 'none';
+    viewer.style.display = 'flex';
+    toolbar.classList.add('visible');
+    dirtyEl.classList.remove('on');
+    filenameEl.innerHTML = (f.path.indexOf('/') !== -1
+        ? esc(f.path.slice(0, f.path.lastIndexOf('/') + 1)) : '') +
+      '<b>' + esc(f.path.split('/').pop()) + '</b> · ' + humanSize(f.size);
+    document.title = 'pico-bay - ' + f.path.split('/').pop();
+
+    var isPy = /\.py$/i.test(f.path);
+    var writable = canWrite();
+    document.getElementById('run-btn').style.display = canRunFiles() && isPy && !f.binary ? 'inline-flex' : 'none';
+    document.getElementById('download-btn').style.display = 'inline-flex';
+    document.getElementById('edit-btn').style.display = writable && !f.binary ? 'inline-flex' : 'none';
+    document.getElementById('rename-btn').style.display = writable ? 'inline-flex' : 'none';
+    document.getElementById('move-btn').style.display = writable ? 'inline-flex' : 'none';
+    document.getElementById('del-btn').style.display = writable ? 'inline-flex' : 'none';
+    document.getElementById('format-json-btn').style.display = 'none';
+    document.getElementById('save-btn').style.display = 'none';
+    document.getElementById('cancel-btn').style.display = 'none';
+
+    codeEl.style.display = 'none';
+    mdEl.style.display = 'none';
+    binEl.style.display = 'none';
+    editorEl.style.display = 'none';
+
+    if (f.binary) {
+      binEl.style.display = 'block';
+      binEl.innerHTML = 'Binary file — ' + humanSize(f.size) +
+        '<br><br><button class="btn icon" onclick="downloadFile()" title="Download to this computer" aria-label="Download to this computer">' +
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06ZM1.75 11a.75.75 0 0 1 .75.75v1.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25v-1.5a.75.75 0 0 1 .75-.75Z"/></svg></button>';
+      return;
+    }
+    if (/\.md$/i.test(f.path)) {
+      mdEl.style.display = 'block';
+      mdEl.innerHTML = renderMarkdown(f.text);
+      return;
+    }
+    codeEl.style.display = 'grid';
+    renderCode(f.text, f.path);
+    scrollEl.scrollTop = 0;
+  }
+
+  // Render an escaped Markdown subset.
+  function markdownInline(text) {
+    var tokens = [];
+    function token(html) { tokens.push(html); return '\uE000' + (tokens.length - 1) + '\uE001'; }
+    function safeHref(href) {
+      return /^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(href) || /^[a-z0-9][a-z0-9._~\/-]*$/i.test(href);
+    }
+    text = text.replace(/`([^`]+)`/g, function (_m, code) {
+      return token('<code>' + esc(code) + '</code>');
+    });
+    text = text.replace(/\[!\[([^\]]*)\]\((https:\/\/[^)]+)\)\]\(([^)]+)\)/gi, function (_m, alt, src, href) {
+      var clean = href.trim();
+      if (!safeHref(clean)) return alt;
+      return token('<a href="' + esc(clean) + '" target="_blank" rel="noopener noreferrer"><img src="' +
+        esc(src.trim()) + '" alt="' + esc(alt) + '"></a>');
+    });
+    text = text.replace(/!\[([^\]]*)\]\((https:\/\/[^)]+)\)/gi, function (_m, alt, src) {
+      return token('<img src="' + esc(src.trim()) + '" alt="' + esc(alt) + '">');
+    });
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function (_m, label, href) {
+      var clean = href.trim();
+      if (!safeHref(clean)) return label;
+      return token('<a href="' + esc(clean) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>');
+    });
+    text = esc(text)
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/_([^_]+)_/g, '<em>$1</em>');
+    return text.replace(/\uE000(\d+)\uE001/g, function (_m, i) { return tokens[Number(i)]; });
+  }
+
+  function safeMarkdownTable(source) {
+    var parsed = new DOMParser().parseFromString(source, 'text/html');
+    var table = parsed.body.firstElementChild;
+    if (!table || table.tagName !== 'TABLE' || parsed.body.children.length !== 1) return esc(source);
+    var allowed = ['TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'CODE'];
+    var elements = [table].concat(Array.from(table.querySelectorAll('*')));
+    for (var i = 0; i < elements.length; i++) {
+      var element = elements[i];
+      if (allowed.indexOf(element.tagName) === -1) return esc(source);
+      var width = element.getAttribute('width');
+      while (element.attributes.length) element.removeAttribute(element.attributes[0].name);
+      if (width && /^(?:100|[1-9]?\d)%$/.test(width)) element.setAttribute('width', width);
+    }
+    return table.outerHTML;
+  }
+
+  function renderMarkdown(text) {
+    var lines = text.replace(/\r\n?/g, '\n').split('\n');
+    var html = [], paragraph = [], list = null, fenced = false, fence = [];
+    function tableCells(line) {
+      var trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+      return trimmed.split('|').map(function (cell) { return cell.trim(); });
+    }
+    function flushParagraph() {
+      if (paragraph.length) html.push('<p>' + markdownInline(paragraph.join(' ')) + '</p>');
+      paragraph = [];
+    }
+    function closeList() {
+      if (list) html.push('</' + list + '>');
+      list = null;
+    }
+    for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      var line = lines[lineIndex];
+      if (/^```/.test(line)) {
+        flushParagraph(); closeList();
+        if (fenced) { html.push('<pre><code>' + esc(fence.join('\n')) + '</code></pre>'); fence = []; }
+        fenced = !fenced;
+        continue;
+      }
+      if (fenced) { fence.push(line); continue; }
+      var m;
+      if (/^<table(?:\s|>)/i.test(line.trim())) {
+        flushParagraph(); closeList();
+        var tableSource = [line];
+        while (!/<\/table>\s*$/i.test(tableSource[tableSource.length - 1]) && lineIndex + 1 < lines.length) {
+          tableSource.push(lines[++lineIndex]);
+        }
+        html.push(safeMarkdownTable(tableSource.join('\n')));
+        continue;
+      }
+      var separatorCells = lineIndex + 1 < lines.length ? tableCells(lines[lineIndex + 1]) : [];
+      if (line.includes('|') && separatorCells.length > 1 && separatorCells.every(function (cell) {
+        return /^:?-{3,}:?$/.test(cell);
+      })) {
+        flushParagraph(); closeList();
+        var headers = tableCells(line);
+        var tableClass = headers[0] === 'Option' ? ' class="options-table"' : '';
+        html.push('<table' + tableClass + '><thead><tr>' + headers.map(function (cell) {
+          return '<th>' + markdownInline(cell) + '</th>';
+        }).join('') + '</tr></thead><tbody>');
+        lineIndex += 2;
+        while (lineIndex < lines.length && lines[lineIndex].trim() && lines[lineIndex].includes('|')) {
+          html.push('<tr>' + tableCells(lines[lineIndex]).map(function (cell) {
+            return '<td>' + markdownInline(cell) + '</td>';
+          }).join('') + '</tr>');
+          lineIndex++;
+        }
+        html.push('</tbody></table>');
+        lineIndex--;
+        continue;
+      }
+      if (!line.trim()) { flushParagraph(); closeList(); continue; }
+      if ((m = /^(#{1,6})\s+(.+)$/.exec(line))) {
+        flushParagraph(); closeList();
+        html.push('<h' + m[1].length + '>' + markdownInline(m[2]) + '</h' + m[1].length + '>');
+      } else if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+        flushParagraph(); closeList(); html.push('<hr>');
+      } else if ((m = /^>\s?(.*)$/.exec(line))) {
+        flushParagraph(); closeList(); html.push('<blockquote><p>' + markdownInline(m[1]) + '</p></blockquote>');
+      } else if ((m = /^\s*[-*+]\s+(.+)$/.exec(line))) {
+        flushParagraph();
+        if (list !== 'ul') { closeList(); html.push('<ul>'); list = 'ul'; }
+        html.push('<li>' + markdownInline(m[1]) + '</li>');
+      } else if ((m = /^\s*\d+[.)]\s+(.+)$/.exec(line))) {
+        flushParagraph();
+        if (list !== 'ol') { closeList(); html.push('<ol>'); list = 'ol'; }
+        html.push('<li>' + markdownInline(m[1]) + '</li>');
+      } else {
+        closeList(); paragraph.push(line.trim());
+      }
+    }
+    if (fenced) html.push('<pre><code>' + esc(fence.join('\n')) + '</code></pre>');
+    flushParagraph(); closeList();
+    return html.join('');
+  }
+
+  function renderCode(text, p) {
+    if (/\.json$/i.test(p)) {
+      try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* show as-is */ }
+    }
+    var lines = text.split('\n');
+    codeEl.innerHTML = lines.map(function (line, i) {
+      var rendered;
+      if (/\.py$/i.test(p)) rendered = hlPython(line);
+      else if (/\.json$/i.test(p)) rendered = hlJSON(line);
+      else rendered = esc(line);
+      return '<div class="code-row"><div class="line-no">' + (i + 1) +
+        '</div><div class="line-src">' + (rendered || '&#8203;') + '</div></div>';
+    }).join('');
+    var lineNumber = codeEl.querySelector('.line-no');
+    codeEl.style.setProperty('--gutter-width', (lineNumber ? lineNumber.getBoundingClientRect().width : 0) + 'px');
+  }
+
+  // Highlight strings and comments before keywords.
+  var PY_KW = /\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|True|False|None|self)\b/g;
+  var PY_SPLIT = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|#[^\n]*|@[A-Za-z_]\w*|\b\d+\.?\d*\b)/g;
+
+  function hlPython(src) {
+    var out = '', last = 0, m;
+    PY_SPLIT.lastIndex = 0;
+    while ((m = PY_SPLIT.exec(src)) !== null) {
+      out += esc(src.slice(last, m.index)).replace(PY_KW, '<span class="tok-kw">$1</span>');
+      var t = m[0], cls = 'tok-str';
+      if (t[0] === '#') cls = 'tok-com';
+      else if (t[0] === '@') cls = 'tok-dec';
+      else if (/^[\d]/.test(t)) cls = 'tok-num';
+      out += '<span class="' + cls + '">' + esc(t) + '</span>';
+      last = m.index + t.length;
+    }
+    return out + esc(src.slice(last)).replace(PY_KW, '<span class="tok-kw">$1</span>');
+  }
+
+  function hlJSON(src) {
+    return esc(src)
+      .replace(/&quot;(\\.|[^&\\])*?&quot;(\s*:)?/g, function (s, _a, colon) {
+        return '<span class="' + (colon ? 'tok-key' : 'tok-str') + '">' + s + '</span>';
+      })
+      .replace(/\b(true|false|null)\b/g, '<span class="tok-kw">$1</span>')
+      .replace(/\b(-?\d+\.?\d*)\b/g, '<span class="tok-num">$1</span>');
+  }
+
+  // ── Editing ──
+  function hasUnsavedChanges() {
+    return !!(editing && curFile && editorEl.value !== curFile.text);
+  }
+
+  function updateDirtyState() {
+    dirtyEl.classList.toggle('on', hasUnsavedChanges());
+  }
+
+  function startEdit() {
+    if (!requireWriteAccess()) return;
+    if (!curFile || curFile.binary) return;
+    closeConsole();
+    editing = true;
+    editorEl.value = curFile.text;
+    updateDirtyState();
+    codeEl.style.display = 'none';
+    mdEl.style.display = 'none';
+    editorEl.style.display = 'block';
+    editorEl.style.height = Math.max(scrollEl.clientHeight - 4, 300) + 'px';
+    document.getElementById('run-btn').style.display = 'none';
+    document.getElementById('download-btn').style.display = 'none';
+    document.getElementById('edit-btn').style.display = 'none';
+    document.getElementById('rename-btn').style.display = 'none';
+    document.getElementById('move-btn').style.display = 'none';
+    document.getElementById('del-btn').style.display = 'none';
+    document.getElementById('format-json-btn').style.display = /\.json$/i.test(curFile.path) ? 'inline-flex' : 'none';
+    document.getElementById('save-btn').style.display = 'inline-flex';
+    document.getElementById('cancel-btn').style.display = 'inline-flex';
+    editorEl.focus();
+  }
+
+  async function cancelEdit() {
+    if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
+      title: 'Discard changes?', confirmLabel: 'Discard', danger: true
+    })) return;
+    editing = false;
+    document.getElementById('download-btn').style.display = 'inline-flex';
+    showFile();
+  }
+
+  function formatJSON() {
+    if (!curFile || !/\.json$/i.test(curFile.path)) return;
+    try {
+      editorEl.value = JSON.stringify(JSON.parse(editorEl.value), null, 3) + '\n';
+      updateDirtyState();
+      toast('JSON formatted with 3-space indentation');
+    } catch (e) {
+      toast('Invalid JSON: ' + e.message, true);
+    }
+  }
+
+  async function saveEdit() {
+    if (!requireWriteAccess()) return;
+    if (!curFile) return;
+    var text = editorEl.value;
+    try {
+      await api('/api/file?path=' + encodeURIComponent(curFile.path), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: new Blob([text]),
+      });
+      curFile.text = text;
+      curFile.size = new Blob([text]).size;
+      editing = false;
+      document.getElementById('download-btn').style.display = 'inline-flex';
+      showFile();
+      toast('Saved ' + curFile.path);
+      loadFiles();
+    } catch (e) { toast('Save failed: ' + e.message, true); }
+  }
+
+  editorEl.addEventListener('input', updateDirtyState);
+  editorEl.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); saveEdit(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var s = editorEl.selectionStart, en = editorEl.selectionEnd;
+      editorEl.value = editorEl.value.slice(0, s) + '    ' + editorEl.value.slice(en);
+      editorEl.selectionStart = editorEl.selectionEnd = s + 4;
+      updateDirtyState();
+    }
+  });
+
+  // ── File actions ──
+  function downloadAll() {
+    if (!curDev) return;
+    window.location = '/api/zip?dev=' + encodeURIComponent(curDev);
+  }
+  function pickRestore() {
+    if (!curDev || !requireWriteAccess()) return;
+    closeMenu();
+    restoreInput.value = '';
+    restoreInput.click();
+  }
+  restoreInput.addEventListener('change', async function () {
+    var file = restoreInput.files && restoreInput.files[0];
+    if (!file) return;
+    if (!await confirmDialog('Existing files with matching paths will be overwritten. Other files will remain.', {
+      title: 'Restore "' + file.name + '"?', confirmLabel: 'Restore'
+    })) return;
+    try {
+      var result = await api('/api/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: file,
+      });
+      resetView();
+      await loadFiles();
+      toast('Restored ' + result.restored + ' file' + (result.restored === 1 ? '' : 's'));
+    } catch (e) { toast('Restore failed: ' + e.message, true); }
+  });
+  function downloadPath(p) {
+    window.location = '/api/file?download=1&path=' + encodeURIComponent(p) + '&dev=' + encodeURIComponent(curDev);
+  }
+  function downloadFile() { if (curFile) downloadPath(curFile.path); }
+  function deleteCurrentFile() { if (curFile) deletePath(curFile.path, false); }
+
+  var moveMenuEl = document.getElementById('move-menu');
+
+  function toggleMoveMenu(e) {
+    if (e) e.stopPropagation();
+    if (!curFile) return;
+    if (moveMenuEl.classList.contains('open')) {
+      closeMoveMenu();
+      return;
+    }
+    renderMoveMenu();
+    moveMenuEl.classList.add('open');
+  }
+
+  function closeMoveMenu() {
+    if (moveMenuEl) moveMenuEl.classList.remove('open');
+  }
+
+  document.addEventListener('click', closeMoveMenu);
+
+  function renderMoveMenu() {
+    if (!curFile) return;
+    var curDir = curFile.path.indexOf('/') !== -1 ? curFile.path.slice(0, curFile.path.lastIndexOf('/')) : '';
+    var dirs = allFiles.filter(function (f) { return f.isDir; });
+    var html = '';
+    html += '<button data-target-dir="">' + (curDir === '' ? '✓ ' : '') + '/ (root)</button>';
+    dirs.forEach(function (d) {
+      var isCurrent = curDir === d.path;
+      html += '<button data-target-dir="' + esc(d.path) + '">' + (isCurrent ? '✓ ' : '') + '📁 ' + esc(d.path) + '/</button>';
+    });
+    html += '<hr><button data-target-dir="__new__">+ New folder…</button>';
+    moveMenuEl.innerHTML = html;
+  }
+
+  moveMenuEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-target-dir]');
+    if (!btn) return;
+    var targetDir = btn.dataset.targetDir;
+    if (targetDir === '__new__') moveCurrentFileToNewFolder();
+    else moveCurrentFileTo(targetDir);
+  });
+
+  async function moveCurrentFileTo(targetDir) {
+    if (!requireWriteAccess()) return;
+    closeMoveMenu();
+    if (!curFile) return;
+    var baseName = curFile.path.split('/').pop();
+    var to = targetDir ? targetDir + '/' + baseName : baseName;
+    if (to === curFile.path) return;
+    var from = curFile.path;
+    try {
+      await api('/api/rename?path=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to), { method: 'POST' });
+      resetView();
+      await loadFiles();
+      openFile(to);
+      toast('Moved to ' + to);
+    } catch (e) { toast('Move failed: ' + e.message, true); }
+  }
+
+  async function moveCurrentFileToNewFolder() {
+    if (!requireWriteAccess()) return;
+    closeMoveMenu();
+    if (!curFile) return;
+    var folderName = await promptDialog('Enter a name for the new folder.', '', { title: 'New folder', confirmLabel: 'Create' });
+    if (!folderName) return;
+    var cleanFolder = folderName.replace(/^[/]+|[/]+$/g, '');
+    if (!cleanFolder) return;
+    try {
+      await api('/api/mkdir?path=' + encodeURIComponent(cleanFolder), { method: 'POST' });
+      await moveCurrentFileTo(cleanFolder);
+    } catch (e) { toast('Could not create folder: ' + e.message, true); }
+  }
+
+  async function renameCurrentFile() {
+    if (!requireWriteAccess()) return;
+    if (!curFile) return;
+    var oldPath = curFile.path;
+    var oldName = oldPath.split('/').pop();
+    var dir = oldPath.indexOf('/') !== -1 ? oldPath.slice(0, oldPath.lastIndexOf('/')) : '';
+    var newName = await promptDialog('Enter a new name for this file.', oldName, { title: 'Rename file', confirmLabel: 'Rename' });
+    if (!newName || newName === oldName) return;
+    var to = dir ? dir + '/' + newName : newName;
+    try {
+      await api('/api/rename?path=' + encodeURIComponent(oldPath) + '&to=' + encodeURIComponent(to), { method: 'POST' });
+      resetView();
+      await loadFiles();
+      openFile(to);
+      toast('Renamed to ' + newName);
+    } catch (e) { toast('Rename failed: ' + e.message, true); }
+  }
+
+  async function deletePath(p, isDir) {
+    if (!requireWriteAccess()) return;
+    var msg = isDir
+      ? 'Delete the folder "' + p + '" and everything inside it?'
+      : 'Delete "' + p + '" from the board?';
+    if (!await confirmDialog(msg, {
+      title: isDir ? 'Delete folder?' : 'Delete file?', confirmLabel: 'Delete', danger: true
+    })) return;
+    try {
+      await api('/api/file?path=' + encodeURIComponent(p), { method: 'DELETE' });
+      toast('Deleted ' + p);
+      if (curFile && (curFile.path === p || curFile.path.indexOf(p + '/') === 0)) resetView();
+      loadFiles();
+    } catch (e) { toast('Delete failed: ' + e.message, true); }
+  }
+
+  async function newFile(parentDir) {
+    if (!requireWriteAccess()) return;
+    var name = await promptDialog('You may include a folder, for example scripts/blink.py.', '', {
+      title: 'New file', confirmLabel: 'Create'
+    });
+    if (!name) return;
+    name = parentDir ? parentDir + '/' + name.replace(/^[/]+/, '') : name;
+    try {
+      await api('/api/touch?path=' + encodeURIComponent(name), { method: 'POST' });
+      await loadFiles();
+      openFile(name.replace(/^[/]+/, ''));
+    } catch (e) { toast('Could not create: ' + e.message, true); }
+  }
+
+  async function newFolder(parentDir) {
+    if (!requireWriteAccess()) return;
+    var name = await promptDialog('Enter a name for the new folder.', '', { title: 'New folder', confirmLabel: 'Create' });
+    if (!name) return;
+    name = parentDir ? parentDir + '/' + name.replace(/^[/]+/, '') : name;
+    try { await api('/api/mkdir?path=' + encodeURIComponent(name), { method: 'POST' }); loadFiles(); }
+    catch (e) { toast('Could not create: ' + e.message, true); }
+  }
+
+  async function renamePath(p) {
+    if (!requireWriteAccess()) return;
+    var to = await promptDialog('Enter the new path.', p, { title: 'Move or rename', confirmLabel: 'Save' });
+    if (!to || to === p) return;
+    try {
+      await api('/api/rename?path=' + encodeURIComponent(p) + '&to=' + encodeURIComponent(to), { method: 'POST' });
+      if (curFile && curFile.path === p) {
+        resetView();
+        openFile(to);
+      } else {
+        loadFiles();
+      }
+      toast('Moved / renamed to ' + to);
+    } catch (e) { toast('Rename failed: ' + e.message, true); }
+  }
+
+  // Keep the editor fitted to the pane.
+  window.addEventListener('resize', function () {
+    if (editing) editorEl.style.height = Math.max(scrollEl.clientHeight - 4, 300) + 'px';
+  });
+
+  // ── Upload & Drag/Drop ──
+  function pickUpload() { if (requireWriteAccess()) { fileInput.value = ''; fileInput.click(); } }
+  function pickUploadFolder() { if (requireWriteAccess()) { folderInput.value = ''; folderInput.click(); } }
+  fileInput.addEventListener('change', function () { uploadFiles(fileInput.files); });
+  folderInput.addEventListener('change', function () { uploadFiles(folderInput.files, '', true); });
+
+  function isFileDrag(e) {
+    return e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1;
+  }
+
+  async function uploadFiles(files, targetDir, preserveRelativePaths) {
+    if (!curDev || !files || !files.length || !requireWriteAccess()) return;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var relativePath = preserveRelativePaths && f.webkitRelativePath ? f.webkitRelativePath : f.name;
+      if (preserveRelativePaths && relativePath.indexOf('/') !== -1) {
+        relativePath = relativePath.slice(relativePath.indexOf('/') + 1);
+      }
+      var path = targetDir ? targetDir + '/' + relativePath : relativePath;
+      var exists = allFiles.some(function (item) { return !item.isDir && item.path === path; });
+      if (exists && !await confirmDialog('A file already exists at "' + path + '".', {
+        title: 'Overwrite file?', confirmLabel: 'Overwrite', danger: true
+      })) continue;
+      try {
+        await api('/api/file?path=' + encodeURIComponent(path), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: f,
+        });
+        toast('Uploaded ' + path + ' (' + humanSize(f.size) + ')');
+      } catch (e) {
+        toast('Upload failed for ' + path + ': ' + e.message, true);
+      }
+    }
+    loadFiles();
+  }
+
+  var draggedPath = null;
+  listEl.addEventListener('dragstart', function (e) {
+    var row = e.target.closest('.file');
+    if (!row || row.dataset.dir === '1') return;
+    var filePath = row.dataset.path;
+    draggedPath = canWrite() ? filePath : null;
+    if (e.dataTransfer) {
+      e.dataTransfer.setData('text/plain', filePath);
+      var fileName = filePath.split('/').pop().replace(/[\r\n:]/g, '_');
+      var downloadUrl = new URL('/api/file?download=1&path=' + encodeURIComponent(filePath) +
+        '&dev=' + encodeURIComponent(curDev), window.location.href).href;
+      e.dataTransfer.setData('DownloadURL', 'application/octet-stream:' + fileName + ':' + downloadUrl);
+      e.dataTransfer.setData('text/uri-list', downloadUrl);
+      e.dataTransfer.effectAllowed = 'copyMove';
+    }
+  });
+  listEl.addEventListener('dragend', function () { draggedPath = null; });
+
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    listEl.addEventListener(ev, function (e) {
+      if (!curDev) return;
+      if (isFileDrag(e) && !canWrite()) return;
+      e.preventDefault();
+      var dirRow = e.target.closest('.file.dir');
+      if (isFileDrag(e)) {
+        document.querySelectorAll('.file.drop-target').forEach(function (el) { el.classList.remove('drop-target'); });
+        if (dirRow) dirRow.classList.add('drop-target');
+        else listEl.classList.add('dropping');
+      } else if (draggedPath && dirRow && dirRow.dataset.path !== draggedPath) {
+        document.querySelectorAll('.file.drop-target').forEach(function (el) { el.classList.remove('drop-target'); });
+        dirRow.classList.add('drop-target');
+      }
+    });
+  });
+
+  ['dragleave', 'drop'].forEach(function (ev) {
+    listEl.addEventListener(ev, function (e) {
+      e.preventDefault();
+      listEl.classList.remove('dropping');
+      document.querySelectorAll('.file.drop-target').forEach(function (el) { el.classList.remove('drop-target'); });
+    });
+  });
+
+  listEl.addEventListener('drop', async function (e) {
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+      if (!requireWriteAccess()) return;
+      var uploadDirRow = e.target.closest('.file.dir');
+      uploadFiles(e.dataTransfer.files, uploadDirRow ? uploadDirRow.dataset.path : '');
+      return;
+    }
+    if (!draggedPath) return;
+    var row = e.target.closest('.file.dir');
+    var targetDir = row ? row.dataset.path : '';
+    var baseName = draggedPath.split('/').pop();
+    var to = targetDir ? targetDir + '/' + baseName : baseName;
+    if (to === draggedPath) return;
+    var from = draggedPath;
+    draggedPath = null;
+    try {
+      await api('/api/rename?path=' + encodeURIComponent(from) + '&to=' + encodeURIComponent(to), { method: 'POST' });
+      await loadFiles();
+      if (curFile && curFile.path === from) {
+        openFile(to);
+      }
+      toast('Moved to ' + to);
+    } catch (err) { toast('Move failed: ' + err.message, true); }
+  });
+
+  // ── Board actions ──
+  async function doReset(hard) {
+    if (!curDev) return;
+    try {
+      await api('/api/reset' + (hard ? '?hard=1' : ''), { method: 'POST' });
+      toast(hard ? 'Hard reset sent' : 'Board reset — program restarted');
+      if (hard) { setTimeout(loadDevices, 2500); }
+      else loadFiles();
+    } catch (e) { toast('Reset failed: ' + e.message, true); }
+  }
+
+  async function doInterrupt() {
+    if (!curDev) return;
+    try { await api('/api/interrupt', { method: 'POST' }); } catch (e) { toast(e.message, true); }
+  }
+
+  async function runFile() {
+    if (!curFile) return;
+    if (!canRunFiles()) { toast('Running files is not available for this device', true); return; }
+    openConsole(true);
+    try {
+      var r = await api('/api/run?path=' + encodeURIComponent(curFile.path), { method: 'POST', body: '' });
+      if (r && r.out && conOut.textContent.indexOf(r.out.trim()) === -1) {
+        conWrite('out', r.out);
+      }
+      if (r && r.err && conOut.textContent.indexOf(r.err.trim()) === -1) {
+        conWrite('err', r.err);
+      }
+    } catch (e) { toast('Run failed: ' + e.message, true); }
+  }
+
+  async function doClean() {
+    if (!requireWriteAccess()) return;
+    closeMenu();
+    if (!await confirmDialog('This deletes every file on the board, including main.py. This cannot be undone.', {
+      title: 'Delete all files?', confirmLabel: 'Delete all', danger: true, defaultCancel: true
+    })) return;
+    try {
+      var r = await api('/api/clean', { method: 'POST' });
+      resetView();
+      toast('Board filesystem cleaned');
+      loadFiles();
+    } catch (e) { toast('Clean failed: ' + e.message, true); }
+  }
+
+  // ── Menu ──
+  async function toggleSystemFiles() {
+    hideSystemFiles = !hideSystemFiles;
+    hideSystemFilesButton.classList.toggle('showing', !hideSystemFiles);
+    hideSystemFilesButton.setAttribute('aria-pressed', hideSystemFiles ? 'true' : 'false');
+    if (!hideSystemFiles && !loadedSystemFiles) {
+      listEl.innerHTML = '<div id="empty">Loading system files…</div>';
+      await loadFiles();
+    } else {
+      renderList();
+    }
+  }
+  function exitReadme() {
+    if (!readmeScreenEl || readmeScreenEl.style.display === 'none') return;
+    readmeScreenEl.style.display = 'none';
+    mainScreenEl.style.display = 'flex';
+    document.title = curFile ? 'pico-bay - ' + curFile.path.split('/').pop() : 'pico-bay';
+  }
+  async function showReadme() {
+    try {
+      var response = await serverFetch('/api/readme');
+      if (!response.ok) throw new Error('Server returned HTTP ' + response.status);
+      readmeContentEl.innerHTML = renderMarkdown(await response.text());
+      mainScreenEl.style.display = 'none';
+      readmeScreenEl.style.display = 'block';
+      readmeScreenEl.scrollTop = 0;
+      document.title = 'pico-bay - README.md';
+    } catch (e) {
+      toast('Could not open README.md: ' + e.message, true);
+    }
+  }
+  function showAbout() {
+    showDialog({
+      title: 'About Pico Bay',
+      messageHTML: 'A local, zero-dependency web interface and MCP server for managing MicroPython and CircuitPython boards, such as the Raspberry Pi Pico, over USB.<br><br>' +
+        '<strong>Author:</strong> ctrlPi<br>' +
+        '<strong>Version:</strong> {{VERSION}}<br>' +
+        '<strong>GitHub:</strong> <a href="https://github.com/ctrlpi/pico-bay" target="_blank" rel="noopener noreferrer">https://github.com/ctrlpi/pico-bay ↗</a><br>' +
+        '<strong>npm:</strong> <a href="https://www.npmjs.com/package/@ctrlpi/pico-bay" target="_blank" rel="noopener noreferrer">https://www.npmjs.com/package/@ctrlpi/pico-bay ↗</a><br>' +
+        '<strong>Support:</strong> <a href="https://github.com/ctrlpi/pico-bay/issues" target="_blank" rel="noopener noreferrer">Report an issue ↗</a><br>' +
+        '<strong>License:</strong> MIT',
+      footerHTML: '<strong>Contact:</strong> <a href="mailto:info@ctrlpi.com">info@ctrlpi.com</a>',
+      confirmLabel: 'Close',
+      cancel: false
+    });
+  }
+  function toggleMenu(e) { e.stopPropagation(); menuEl.classList.toggle('open'); }
+  function closeMenu() { menuEl.classList.remove('open'); }
+  document.addEventListener('click', closeMenu);
+  menuEl.addEventListener('click', function (e) { e.stopPropagation(); closeMenu(); });
+
+  // ── Console ──
+  function toggleConsole() { consoleEl.classList.toggle('open'); conChev.textContent = consoleEl.classList.contains('open') ? '▼' : '▶'; }
+  function closeConsole() {
+    consoleEl.classList.remove('open');
+    conChev.textContent = '▶';
+  }
+  function scrollConsoleBottom() { conOut.scrollTop = conOut.scrollHeight; }
+  function openConsole(scrollToBottom) {
+    if (!consoleEl.classList.contains('open')) toggleConsole();
+    if (scrollToBottom) requestAnimationFrame(scrollConsoleBottom);
+  }
+  function clearConsole() { conOut.textContent = ''; consoleControlBuffer = ''; }
+
+  function cleanConsoleText(text) {
+    var input = consoleControlBuffer + String(text);
+    var output = '';
+    consoleControlBuffer = '';
+    for (var i = 0; i < input.length;) {
+      if (input.charCodeAt(i) !== 27) {
+        output += input[i++];
+        continue;
+      }
+      if (i + 1 >= input.length) { consoleControlBuffer = input.slice(i); break; }
+      var kind = input[i + 1];
+      if (kind === '[') {
+        var csiEnd = i + 2;
+        while (csiEnd < input.length && (input.charCodeAt(csiEnd) < 0x40 || input.charCodeAt(csiEnd) > 0x7e)) csiEnd++;
+        if (csiEnd >= input.length) { consoleControlBuffer = input.slice(i); break; }
+        i = csiEnd + 1;
+      } else if (kind === ']') {
+        var oscEnd = i + 2;
+        while (oscEnd < input.length && input.charCodeAt(oscEnd) !== 7 &&
+               !(input.charCodeAt(oscEnd) === 27 && input[oscEnd + 1] === '\\')) oscEnd++;
+        if (oscEnd >= input.length) { consoleControlBuffer = input.slice(i); break; }
+        i = input.charCodeAt(oscEnd) === 7 ? oscEnd + 1 : oscEnd + 2;
+      } else {
+        i += 2;
+      }
+    }
+    return output;
+  }
+
+  function conWrite(type, text) {
+    var device = currentDevice();
+    if (type === 'out' && device && device.firmware === 'circuitpython') text = cleanConsoleText(text);
+    if (!text) return;
+    var span = document.createElement('span');
+    if (type === 'err') span.className = 'e';
+    if (type === 'sys') span.className = 's';
+    span.textContent = text;
+    conOut.appendChild(span);
+    while (conOut.childNodes.length > 800) conOut.removeChild(conOut.firstChild);
+    conOut.scrollTop = conOut.scrollHeight;
+  }
+
+  function openConsoleStream() {
+    closeConsoleStream();
+    if (!curDev) return;
+    evtSource = new EventSource('/api/console?dev=' + encodeURIComponent(curDev));
+    evtSource.onmessage = function (e) {
+      var m = JSON.parse(e.data);
+      conWrite(m.type, m.text);
+    };
+    evtSource.onerror = function () { /* EventSource retries on its own */ };
+  }
+  function closeConsoleStream() {
+    consoleControlBuffer = '';
+    if (evtSource) { evtSource.close(); evtSource = null; }
+  }
+
+  conIn.addEventListener('keydown', async function (e) {
+    if (e.key !== 'Enter') return;
+    if (!requireConsoleAccess()) return;
+    var code = conIn.value;
+    if (!code.trim() || !curDev) return;
+    conIn.value = '';
+    try { await api('/api/run', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: code }); }
+    catch (err) { conWrite('err', err.message + '\n'); }
+  });
+
+  // ── Drag to resize the console ──
+  consoleResize.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    consoleResize.setPointerCapture(e.pointerId);
+    consoleResize.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'row-resize';
+    function onMove(ev) {
+      var rect = document.getElementById('right').getBoundingClientRect();
+      var h = Math.max(110, Math.min(rect.bottom - ev.clientY, rect.height - 100));
+      consoleEl.style.setProperty('--console-height', h + 'px');
+    }
+    function onUp(ev) {
+      if (consoleResize.hasPointerCapture(ev.pointerId)) consoleResize.releasePointerCapture(ev.pointerId);
+      consoleResize.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      consoleResize.removeEventListener('pointermove', onMove);
+      consoleResize.removeEventListener('pointerup', onUp);
+      consoleResize.removeEventListener('pointercancel', onUp);
+    }
+    consoleResize.addEventListener('pointermove', onMove);
+    consoleResize.addEventListener('pointerup', onUp);
+    consoleResize.addEventListener('pointercancel', onUp);
+  });
+
+  // ── Drag to resize the sidebar ──
+  var dragbar = document.getElementById('dragbar');
+  var sidebarEl = document.getElementById('sidebar');
+  var mainEl = document.getElementById('main');
+  dragbar.addEventListener('mousedown', function (e) {
+    e.preventDefault();
+    dragbar.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    function onMove(ev) {
+      var rect = mainEl.getBoundingClientRect();
+      var w = Math.max(180, Math.min(ev.clientX - rect.left, rect.width - 220));
+      sidebarEl.style.flex = '0 0 ' + w + 'px';
+    }
+    function onUp() {
+      dragbar.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  window.addEventListener('beforeunload', function (e) {
+    if (hasUnsavedChanges()) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  setEnabled(false);
+  refreshDevices(document.getElementById('refresh-btn'));
+  setInterval(loadDevices, 3000);   // hot-plug: pills appear and vanish on their own
+</script>
+</body>
+</html>
