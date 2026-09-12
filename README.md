@@ -1,12 +1,12 @@
 # pico-bay
 
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
-[![Version 0.9.23](https://img.shields.io/badge/version-0.9.23-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.24](https://img.shields.io/badge/version-0.9.24-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
 
-`pico-bay` is a local **Web App** and **MCP Server** for managing MicroPython and CircuitPython boards, such as the Raspberry Pi Pico, over USB. It runs with Node.js built-in modules and needs no browser extension or runtime npm dependencies.
+`pico-bay` is an **App** and **MCP Server** for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, over USB. It runs with Node.js built-in modules and needs no browser extension or runtime npm dependencies.
 
 ## Quick start
 
@@ -22,10 +22,11 @@ Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-
 
 ## Devices
 
-- Supports MicroPython and CircuitPython boards, including the Raspberry Pi Pico, Pico W, Pico 2, and Pico 2 W.
+- Supports Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, including Pico, Pico W, Pico 2, and Pico 2 W.
 - Detects multiple connected boards and follows USB hot-plug events.
 - Detects MicroPython or CircuitPython automatically, including whether its filesystem is read-only or writable.
 - Detects RP2040 and RP2350 BOOTSEL mode and installs the latest MicroPython firmware for the selected Pico model.
+- Detects Espressif ROM download mode over USB serial without extra dependencies, with a red device pill and detected chip details. ESP32 firmware installation is not supported.
 - Shows Flash and RAM usage for each board.
 - Supports soft reset, hard reset, Ctrl-C interruption, and filesystem cleanup.
 
@@ -111,11 +112,19 @@ To enter BOOTSEL mode, disconnect the board, hold its **BOOTSEL** button, reconn
 
 pico-bay confirms the operation, downloads the latest matching MicroPython UF2 from [micropython.org](https://micropython.org/download/), and copies it to the boot volume. Keep the board connected during installation. It reboots automatically and then appears as a normal MicroPython device.
 
+## ESP32 download mode
+
+Hold **BOOT**, tap **RESET / EN**, then release **BOOT** to enter the serial ROM bootloader on boards with these buttons. Click **Scan** in pico-bay. After the initial Python probe fails, a read-only handshake detects download mode; no USB storage folder is required.
+
+The red **DOWNLOAD** pill opens a details screen showing the chip family, serial port, baud rate, and available ROM identifiers. Classic ESP32 also reports its MAC address when readable. ESP32, ESP32-S2, ESP32-C3, and ESP32-S3 have named identification; other responding Espressif chips show an unidentified chip label and any available chip ID. Firmware version, board model, and flash capacity are not inferred from the chip family.
+
+This feature only detects the bootloader: it does not erase, flash, upload a helper, or automatically change the boot mode. To return to normal operation, release **BOOT**, press **RESET / EN**, then click **Scan** again. Ordinary polling uses cached identification to avoid interrupting running programs.
+
 ## Requirements
 
 - Node.js 20 or newer.
 - Raspberry Pi OS, macOS, or Linux. Windows can access pico-bay through a Raspberry Pi but cannot host it.
-- A USB-connected board running MicroPython or CircuitPython, or a supported Pico in BOOTSEL mode.
+- A USB-connected Raspberry Pi Pico or ESP32 board running MicroPython or CircuitPython, or a supported board in bootloader mode.
 - Permission to open the board's serial device.
 
 ## Install
@@ -252,7 +261,7 @@ Do not expose it to an untrusted network.
 
 ### No board appears
 
-- Confirm that the board is running MicroPython or CircuitPython rather than bootloader mode.
+- For file access, confirm that the board is running MicroPython or CircuitPython. Supported bootloader modes appear as red device pills instead.
 - Use a USB data cable and check that its serial device appears under `/dev`.
 - On Linux, check serial permissions, commonly provided by the `dialout` group.
 - Close Thonny, `mpremote`, screen, and other programs that may own the serial port.

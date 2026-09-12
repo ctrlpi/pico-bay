@@ -1,7 +1,7 @@
 {
   "name": "@ctrlpi/pico-bay",
-  "version": "0.9.23",
-  "description": "A Web App and MCP Server for managing MicroPython and CircuitPython boards, such as the Raspberry Pi Pico, over USB.",
+  "version": "0.9.24",
+  "description": "An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, over USB.",
   "keywords": [
     "raspberry-pi-pico",
     "raspberry-pico",

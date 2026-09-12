@@ -192,6 +192,15 @@
   #dragbar:hover, #dragbar.dragging { background: #0969da; }
   #main.bootsel-mode #sidebar, #main.bootsel-mode #dragbar, #main.bootsel-mode #console { display: none; }
   #main.bootsel-mode #placeholder { justify-content: flex-start; padding-top: 48px; box-sizing: border-box; }
+  #main.welcome-mode #placeholder { justify-content: flex-start; padding: 64px 24px 40px; text-align: center; }
+  #main.welcome-mode #placeholder > svg { display: none; }
+  #main.welcome-mode #ph-title { font-size: 30px; color: #24292f; margin: 0 0 16px; }
+  #main.welcome-mode #ph-sub { max-width: 600px; font-size: 16px; line-height: 1.7; }
+  .welcome-content { display: none; max-width: 600px; line-height: 1.7; }
+  #main.welcome-mode .welcome-content { display: block; }
+  #placeholder .welcome-content p { margin: 24px 0; font-size: 15px; font-weight: 400; }
+  .welcome-content strong { color: #24292f; }
+  .welcome-content .btn { margin: 0 5px; }
 
   #search-wrap { padding: 10px; border-bottom: 1px solid #d0d7de; display: flex; gap: 6px; }
   #search {
@@ -290,6 +299,10 @@
   #bootsel-source { display: none; }
   #bootsel-source.visible { display: block; }
   #bootsel-source a { color: #0969da; }
+  .boot-details { display: grid; grid-template-columns: auto 1fr; gap: 10px 24px; text-align: left; max-width: 620px; margin: 0; }
+  .boot-details dt { color: #57606a; }
+  .boot-details dd { margin: 0; overflow-wrap: anywhere; }
+  .recovery-steps { display: grid; gap: 12px; max-width: 680px; padding: 0 24px; text-align: center; color: #24292f; line-height: 1.5; }
 
   /* Keep wrapped text beside its source line number. */
   #viewer { display: none; flex-direction: column; min-height: 100%; }
@@ -426,7 +439,7 @@
 <div id="busy"></div>
 
 <div id="topbar">
-  <a class="brand" href="/" title="Reload Pico Bay">pico-bay</a>
+  <a class="brand" href="/" onclick="showWelcome(true); return false;" title="Welcome message">pico-bay</a>
   <span id="pills"></span>
   <button class="btn icon" id="refresh-btn" onclick="refreshDevices(this)" title="Scan USB for connected boards">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
@@ -540,7 +553,13 @@
       <div id="placeholder">
         <svg width="42" height="42" viewBox="0 0 16 16" fill="#8c959f"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>
         <p id="ph-title">Select a board</p>
-        <small id="ph-sub">Plug a Pico into USB and pick its pill above</small>
+        <small id="ph-sub">Connect a Raspberry Pi Pico or ESP32 board over USB and select it above</small>
+        <div class="welcome-content">
+          <p><strong>Your next project starts here.</strong><br>Browse and edit files, run Python, follow the live console, and back up your boards - all from one place.</p>
+          <p><strong>Connect a Raspberry Pi Pico or ESP32 board with MicroPython or CircuitPython using a USB data cable.</strong><br>It will appear in the top bar automatically. You can also scan for boards at any time.</p>
+          <button class="btn primary" onclick="refreshDevices(document.getElementById('refresh-btn'))">Scan for boards</button>
+          <button class="btn" onclick="showReadme()">Getting started</button>
+        </div>
         <div id="bootsel-options"></div>
         <small id="bootsel-source">Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a></small>
       </div>
@@ -654,6 +673,8 @@
   var evtSource = null;
   var inflight = 0;
   var devicesLoading = false;
+  var initialScanComplete = false;
+  var welcomeSelected = false;
   var serverConnected = null;
   var serverInstance = null;
   var hostWarning = null;
@@ -955,7 +976,8 @@
       '<path d="M9 18v3M15 18v3M6 9H3M6 15H3M21 9h-3M21 15h-3"></path></svg>';
     pillsEl.innerHTML = devices.map(function (d) {
       var details = d.bootMode
-        ? 'BOOTSEL firmware-install mode. Reconnect the board normally to use pico-bay.'
+        ? d.bootloader === 'esp-rom' ? d.machine + ' · ROM download mode · ' + d.dev
+          : 'BOOTSEL firmware-install mode. Reconnect the board normally to use pico-bay.'
         : d.ok ? [
         d.machine || d.label,
         (d.firmwareLabel || 'MicroPython') + (d.release ? ' ' + d.release : ''),
@@ -967,7 +989,7 @@
       return '<button class="pill' + firmwareClass + (d.dev === curDev ? ' active' : '') + (d.ok ? '' : ' bad') +
         '" data-dev="' + esc(d.dev) + '" title="' + esc(details) + '">' +
         picoIcon + esc(d.label) +
-        (d.bootMode ? '<span class="serial">BOOTSEL</span>' : '<span class="serial">' + esc(d.serial) + '</span>') +
+        (d.bootMode ? '<span class="serial">' + (d.bootloader === 'esp-rom' ? 'DOWNLOAD' : 'BOOTSEL') + '</span>' : '<span class="serial">' + (d.probing ? 'Scanning…' : esc(d.serial)) + '</span>') +
         (d.readOnly && !d.bootMode ? '<span class="readonly">RO</span>' : '') + '</button>';
     }).join('');
   }
@@ -985,10 +1007,11 @@
       setMcpEnabled(data.mcpEnabled);
       setHostWarning(data.hostWarning || null);
       var before = devices.map(function (d) { return d.dev; }).join(',');
+      var previousDevice = currentDevice();
       devices = data.devices;
       var selectedDevice = currentDevice();
       setMountWarning(selectedDevice ? selectedDevice.mountCommand : null);
-      setEnabled(!!curDev && !!currentDevice() && !currentDevice().bootMode);
+      setEnabled(!!curDev && !!currentDevice() && currentDevice().ok && !currentDevice().bootMode);
       var now = devices.map(function (d) { return d.dev; }).join(',');
       if (curDev && !devices.some(function (d) { return d.dev === curDev; })) {
         curDev = null; closeConsoleStream(); resetView();
@@ -999,8 +1022,22 @@
         storageEl.classList.remove('visible');
       }
       if (before !== now) renderPills();
-      var firstUsable = devices.find(function (d) { return !d.bootMode; });
-      if (!curDev && firstUsable) selectDev(firstUsable.dev);
+      if (!initialScanComplete) {
+        if (devices.some(function (d) { return d.probing; })) {
+          showWelcome();
+          renderPills();
+          return;
+        }
+        initialScanComplete = true;
+      }
+      if (!welcomeSelected && previousDevice && selectedDevice &&
+          (previousDevice.firmware !== selectedDevice.firmware || previousDevice.ok !== selectedDevice.ok || previousDevice.probing !== selectedDevice.probing ||
+           (selectedDevice.bootMode && JSON.stringify(previousDevice.bootDetails) !== JSON.stringify(selectedDevice.bootDetails)))) {
+        await selectDev(selectedDevice.dev);
+      }
+      if (!devices.length) showWelcome();
+      var firstUsable = devices.find(function (d) { return d.ok && !d.bootMode; }) || devices.find(function (d) { return d.bootMode; }) || devices[0];
+      if (!welcomeSelected && !curDev && firstUsable) selectDev(firstUsable.dev);
       else renderPills();
     } catch (e) {
       // Keep the last state until polling succeeds.
@@ -1011,6 +1048,7 @@
 
   async function refreshDevices(button) {
     if (!button || button.classList.contains('refreshing')) return;
+    welcomeSelected = false;
     exitReadme();
     button.classList.add('refreshing');
     button.disabled = true;
@@ -1025,6 +1063,28 @@
       button.classList.remove('refreshing');
       button.disabled = false;
     }
+  }
+
+  async function showWelcome(userRequested) {
+    if (userRequested && hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
+      title: 'Discard changes?', confirmLabel: 'Discard', danger: true
+    })) return;
+    if (userRequested) {
+      welcomeSelected = true;
+      curDev = null;
+      setMountWarning(null);
+      storageEl.textContent = '';
+      storageEl.classList.remove('visible');
+      renderPills();
+      exitReadme();
+    }
+    if (mainEl.classList.contains('welcome-mode') || mainScreenEl.style.display === 'none') return;
+    closeConsoleStream();
+    setEnabled(false);
+    resetView();
+    mainEl.classList.add('bootsel-mode', 'welcome-mode');
+    phTitle.textContent = 'Welcome to pico-bay';
+    phSub.innerHTML = 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards<br>with MicroPython and CircuitPython, over USB.';
   }
 
   function setEnabled(on) {
@@ -1045,6 +1105,7 @@
     if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
       title: 'Discard changes?', confirmLabel: 'Discard', danger: true
     })) return;
+    welcomeSelected = false;
     exitReadme();
     curDev = dev;
     var selectedDevice = currentDevice();
@@ -1052,6 +1113,26 @@
     loadedSystemFiles = false;
     editing = false;
     renderPills();
+    if (selectedDevice && !selectedDevice.ok) {
+      closeConsoleStream();
+      setEnabled(false);
+      resetView();
+      mainEl.classList.add('bootsel-mode');
+      listEl.innerHTML = '';
+      storageEl.classList.remove('visible');
+      phTitle.textContent = selectedDevice.probing ? 'Identifying board…' : 'Board identification failed';
+      phSub.textContent = selectedDevice.probing
+        ? 'Checking ' + selectedDevice.dev + '. Other connected boards remain available.'
+        : selectedDevice.error;
+      if (!selectedDevice.probing) {
+        bootselOptionsEl.classList.add('visible', 'mount-help');
+        bootselOptionsEl.innerHTML = '<div class="recovery-steps">' +
+          '<strong>To start normally: release BOOT, then press RESET / EN.</strong>' +
+          '<strong>To enter ESP32 download mode: hold BOOT, tap RESET / EN, then release BOOT.</strong>' +
+          '</div><button class="btn" data-rescan>Rescan</button>';
+      }
+      return;
+    }
     if (selectedDevice && selectedDevice.bootMode) {
       closeConsoleStream();
       setEnabled(false);
@@ -1059,6 +1140,31 @@
       mainEl.classList.add('bootsel-mode');
       listEl.innerHTML = '';
       storageEl.classList.remove('visible');
+      if (selectedDevice.bootloader === 'esp-rom') {
+        phTitle.textContent = selectedDevice.label + ' download mode';
+        phSub.textContent = 'Bootloader detected. Release BOOT, press RESET / EN, then Scan to return to MicroPython.';
+        var info = selectedDevice.bootDetails || {};
+        var rows = [
+          ['Chip', selectedDevice.machine],
+          ['Mode', info.mode],
+          ['USB serial port', selectedDevice.dev],
+          ['Baud rate', info.baudRate],
+          ['MAC address', info.mac],
+          ['Chip ID', info.chipId],
+          ['ROM identifier', info.magic],
+          ['Secure download', info.secureDownload === undefined ? null : info.secureDownload ? 'Enabled' : 'Disabled']
+        ];
+        bootselOptionsEl.innerHTML = '<dl class="boot-details">' + rows.filter(function (row) {
+          return row[1] !== undefined && row[1] !== null && row[1] !== '';
+        }).map(function (row) {
+          return '<dt>' + esc(row[0]) + '</dt><dd>' + esc(String(row[1])) + '</dd>';
+        }).join('') + '</dl>';
+        bootselOptionsEl.classList.add('visible');
+        bootselSourceEl.textContent = 'Detection only. ESP32 firmware installation is not supported.';
+        bootselSourceEl.classList.add('visible');
+        return;
+      }
+      bootselSourceEl.innerHTML = 'Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a>';
       phTitle.textContent = selectedDevice.machine + ' BOOTSEL mode';
       phSub.textContent = 'Choose the board model to install the latest MicroPython firmware';
       var choices = selectedDevice.machine === 'RP2040'
@@ -1155,6 +1261,13 @@
   }
 
   bootselOptionsEl.addEventListener('click', async function (e) {
+    var rescanButton = e.target.closest('[data-rescan]');
+    if (rescanButton) {
+      rescanButton.disabled = true;
+      try { await refreshDevices(document.getElementById('refresh-btn')); }
+      finally { rescanButton.disabled = false; }
+      return;
+    }
     var copyButton = e.target.closest('[data-copy-command]');
     if (copyButton) { await copyText(copyButton.dataset.copyCommand, copyButton); return; }
     var retryButton = e.target.closest('[data-retry-firmware]');
@@ -1305,6 +1418,7 @@
     bootselSourceEl.classList.remove('visible');
     document.title = 'pico-bay';
     mainEl.classList.remove('bootsel-mode');
+    mainEl.classList.remove('welcome-mode');
   }
 
   async function openFile(p) {
@@ -1993,7 +2107,7 @@
   function showAbout() {
     showDialog({
       title: 'About Pico Bay',
-      messageHTML: 'A local, zero-dependency web interface and MCP server for managing MicroPython and CircuitPython boards, such as the Raspberry Pi Pico, over USB.<br><br>' +
+      messageHTML: 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, over USB.<br><br>' +
         '<strong>Author:</strong> ctrlPi<br>' +
         '<strong>Version:</strong> {{VERSION}}<br>' +
         '<strong>GitHub:</strong> <a href="https://github.com/ctrlpi/pico-bay" target="_blank" rel="noopener noreferrer">https://github.com/ctrlpi/pico-bay ↗</a><br>' +
@@ -2146,6 +2260,7 @@
   });
 
   setEnabled(false);
+  showWelcome();
   refreshDevices(document.getElementById('refresh-btn'));
   setInterval(loadDevices, 3000);   // hot-plug: pills appear and vanish on their own
 </script>

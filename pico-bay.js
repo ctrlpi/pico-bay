@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-/* Browse MicroPython and CircuitPython boards over USB. */
+/* Manage Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython over USB. */
 
 // Set before async filesystem work starts.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '12';
@@ -87,9 +87,6 @@ const PAGE = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8')
 
 // macOS callout devices open without waiting for carrier detect.
 const DEV_DIR = '/dev';
-const DEV_MATCH = process.platform === 'darwin'
-  ? /^cu\.usbmodem/
-  : /^ttyACM|^ttyUSB/;
 const STTY_FLAG = process.platform === 'darwin' ? '-f' : '-F';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -158,6 +155,7 @@ class PicoPort {
     this.monitors = new Set();
     this.pumping = false;
     this.info = null;       // cached probe result
+    this.probeFailure = null; // avoid retry storms for unresponsive boards
     this.probePromise = null; // coalesces overlapping hot-plug polls
     this.busy = false;
     this.halted = false;    // true while the board sits in the raw REPL
@@ -194,6 +192,7 @@ class PicoPort {
     this._close();
     this.halted = false;
     this.info = null;
+    this.probeFailure = null;
     this.deviceIdentity = null;
     if (capture && capture.reject) capture.reject(new Error('Board disconnected: ' + this.dev));
   }
@@ -403,14 +402,14 @@ class PicoPort {
   }
 
   // Serialize work and debounce release by HOLD_MS.
-  command(fn) {
+  command(fn, { rawRepl = true } = {}) {
     const run = async () => {
       this._cancelIdle();
       this.busy = true;
       this.inCommand = true;
       try {
         this._open();
-        if (!this.halted) {
+        if (rawRepl && !this.halted) {
           this.rx = '';
           await this._enterRaw();
           this.halted = true;
@@ -510,11 +509,14 @@ function parseProbeOutput(out) {
   return values;
 }
 
-function listDevs() {
+function listDevs(platform = process.platform) {
   if (deviceListOverride) return [...deviceListOverride];
+  const devMatch = platform === 'darwin'
+    ? /^cu\.(usbmodem|usbserial)/
+    : /^(ttyACM|ttyUSB)/;
   try {
     return fs.readdirSync(DEV_DIR)
-      .filter(n => DEV_MATCH.test(n))
+      .filter(n => devMatch.test(n))
       .map(n => path.join(DEV_DIR, n))
       .sort();
   } catch { return []; }
@@ -530,6 +532,118 @@ function deviceIdentity(dev) {
 function getPort(dev) {
   if (!ports.has(dev)) ports.set(dev, new PicoPort(dev));
   return ports.get(dev);
+}
+
+// Read-only subset of Espressif's ROM serial protocol (no flash/RAM writes).
+// https://docs.espressif.com/projects/esptool/en/latest/esp32/advanced-topics/serial-protocol.html
+function espSlipEncode(bytes) {
+  const out = [0xc0];
+  for (const byte of bytes) {
+    if (byte === 0xc0) out.push(0xdb, 0xdc);
+    else if (byte === 0xdb) out.push(0xdb, 0xdd);
+    else out.push(byte);
+  }
+  out.push(0xc0);
+  return Buffer.from(out);
+}
+
+function espSlipDecode(bytes) {
+  const out = [];
+  for (let i = 0; i < bytes.length; i++) {
+    let byte = bytes[i];
+    if (byte === 0xdb) {
+      const escaped = bytes[++i];
+      if (escaped !== 0xdc && escaped !== 0xdd) throw new Error('Invalid ESP SLIP escape');
+      byte = escaped === 0xdc ? 0xc0 : 0xdb;
+    }
+    out.push(byte);
+  }
+  return Buffer.from(out);
+}
+
+async function espRomCommand(port, opcode, data = Buffer.alloc(0), timeout = 700) {
+  if (![0x08, 0x0a, 0x14].includes(opcode)) throw new Error('Unsupported ESP detection command');
+  const request = Buffer.alloc(8 + data.length);
+  request[1] = opcode;
+  request.writeUInt16LE(data.length, 2);
+  data.copy(request, 8);
+  await port.write(espSlipEncode(request).toString('binary'));
+  const deadline = Date.now() + timeout;
+  // Bound both traffic and time; ignore boot logs and extra SYNC replies.
+  for (let count = 0; count < 64 && Date.now() < deadline; count++) {
+    const frame = await port.readUntil('\xc0', Math.max(1, deadline - Date.now()));
+    if (frame.length > 1024) throw new Error('Oversized ESP response');
+    let reply;
+    try { reply = espSlipDecode(Buffer.from(frame.slice(0, -1), 'binary')); }
+    catch { continue; }
+    if (reply.length < 10 || reply[0] !== 1 || reply[1] !== opcode) continue;
+    const size = reply.readUInt16LE(2);
+    if (reply.length !== 8 + size || size < 2) continue;
+    const statusSize = size === 2 ? 2 : 4;
+    if (reply[reply.length - statusSize] !== 0 || reply[reply.length - statusSize + 1] !== 0) {
+      throw new Error('ESP ROM rejected detection command');
+    }
+    return { value: reply.readUInt32LE(4), data: reply.subarray(8, reply.length - statusSize) };
+  }
+  throw new Error('No matching ESP ROM response');
+}
+
+async function detectEspBootloader(port) {
+  port.rx = '';
+  const sync = Buffer.concat([Buffer.from([7, 7, 18, 32]), Buffer.alloc(32, 0x55)]);
+  let synced = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const reply = await espRomCommand(port, 0x08, sync);
+      if (reply.value !== 0x20120707) continue;
+      synced = true;
+      break;
+    }
+    catch { /* Retry synchronization, but never reset or write firmware. */ }
+  }
+  if (!synced) return null;
+  const details = { mode: 'ROM download mode', baudRate: 115200 };
+  let chip = null;
+  const readReg = async address => {
+    const data = Buffer.alloc(4);
+    data.writeUInt32LE(address);
+    return (await espRomCommand(port, 0x0a, data)).value;
+  };
+  try {
+    const { data } = await espRomCommand(port, 0x14);
+    if (data.length === 12 || data.length === 20) {
+      details.secureDownload = !!(data.readUInt32LE(0) & 4);
+      if (data.length === 20) {
+        details.chipId = data.readUInt32LE(12);
+        chip = ({ 5: 'ESP32-C3', 9: 'ESP32-S3' })[details.chipId] || null;
+      }
+    }
+  } catch { /* Older ROMs do not implement GET_SECURITY_INFO. */ }
+  if (!chip && details.chipId === undefined) {
+    try {
+      const magic = await readReg(0x40001000);
+      details.magic = '0x' + magic.toString(16).padStart(8, '0');
+      chip = ({ [0x00f01d83]: 'ESP32', [0x000007c6]: 'ESP32-S2' })[magic] || null;
+    } catch { /* Restricted ROMs can deny register reads. */ }
+  }
+  if (chip === 'ESP32') {
+    try {
+      const low = await readReg(0x3ff5a004);
+      const high = await readReg(0x3ff5a008);
+      const mac = Buffer.alloc(6);
+      mac.writeUInt16BE(high & 0xffff, 0);
+      mac.writeUInt32BE(low, 2);
+      details.mac = [...mac].map(byte => byte.toString(16).padStart(2, '0')).join(':');
+    } catch { /* Keep the confirmed chip even if optional identity is unavailable. */ }
+  }
+  return {
+    dev: port.dev, bootMode: true, bootloader: 'esp-rom',
+    firmware: 'esp-bootloader', firmwareLabel: 'Download mode',
+    machine: chip || 'Espressif chip (unidentified)', label: chip || 'Espressif',
+    release: '', uid: details.mac ? details.mac.replace(/:/g, '') : '',
+    serial: '', readOnly: true, bootDetails: details,
+    capabilities: { read: false, write: false, run: false, console: false },
+  };
 }
 
 // Accept complete probe markers even when auto-reload prevents the final prompt.
@@ -550,6 +664,14 @@ async function probeRecord(port, key, code, attempts = 4) {
     }
     const found = marker.exec(cleanReplOutput(text));
     if (found && found[1].trim()) return found[1].trim();
+    if (key === 'IMPL' && attempt === 0 && port instanceof PicoPort) {
+      const boot = await port.command(detectEspBootloader, { rawRepl: false }).catch(() => null);
+      if (boot) { port.info = boot; return 'esp-bootloader'; }
+      const resetLoop = /RTCWDT_RTC_RESET|TG0WDT_SYS_RESET|TG1WDT_SYS_RESET/.test(text);
+      throw new Error(resetLoop
+        ? 'Board reports watchdog resets during flash boot and does not respond to MicroPython or the download bootloader.'
+        : 'Board did not respond to MicroPython or the ESP download bootloader. Check its firmware and boot mode, then Scan to retry.');
+    }
   }
   if (lastError) throw lastError;
   throw new Error('board did not report ' + key.toLowerCase());
@@ -589,6 +711,8 @@ async function probe(dev) {
   const p = getPort(dev);
   if (p.info) return p.info;
   if (p.probePromise) return p.probePromise;
+  if (p.probeFailure && Date.now() < p.probeFailure.retryAt) throw p.probeFailure.error;
+  p.probeFailure = null;
   p.probePromise = (async () => {
     const detected = await probeRecord(
       p,
@@ -596,6 +720,7 @@ async function probe(dev) {
       "import sys;print('PVI_IMPL',getattr(sys.implementation,'name','micropython'))",
       10,
     );
+    if (detected === 'esp-bootloader') return p.info;
     let values;
     if (detected === 'circuitpython') {
       values = {
@@ -636,6 +761,10 @@ async function probe(dev) {
     return p.info;
   })();
   try { return await p.probePromise; }
+  catch (error) {
+    p.probeFailure = { error, retryAt: Date.now() + 30000 };
+    throw error;
+  }
   finally { p.probePromise = null; }
 }
 
@@ -655,14 +784,17 @@ async function requireWritable(dev) {
 // "Raspberry Pi Pico 2 W with RP2350" -> "Pico 2 W"
 function shortModel(machine) {
   if (!machine) return 'Pico';
-  const m = machine.replace(/^Raspberry Pi\s+/i, '').split(/\s+with\s+/i)[0].trim();
+  let m = machine.replace(/^Raspberry Pi\s+/i, '').split(/\s+with\s+/i)[0].trim();
+  if (/\bESP32/i.test(m)) {
+    m = m.replace(/^Generic\s+/i, '').replace(/\s+module$/i, '').trim();
+  }
   return m || machine;
 }
 
 const loggedDevices = new Map();
 let loggedNoDevices = false;
 
-async function scanDevices() {
+async function scanDevices({ waitForProbes = true } = {}) {
   const devs = listDevs();
   for (const [dev, port] of ports) {
     if (devs.includes(dev)) {
@@ -678,6 +810,17 @@ async function scanDevices() {
   }
   const serialDevices = await Promise.all(devs.map(async (dev) => {
     try {
+      const port = getPort(dev);
+      if (!waitForProbes && !port.info &&
+          !(port.probeFailure && Date.now() < port.probeFailure.retryAt)) {
+        // Start/coalesce identification, but return the other boards immediately.
+        void probe(dev).catch(() => {});
+        return {
+          dev, ok: false, probing: true, label: path.basename(dev),
+          serial: '', error: 'Identifying board…',
+          capabilities: { read: false, write: false, run: false, console: false },
+        };
+      }
       const info = await probe(dev);
       if (info.firmware === 'circuitpython') {
         const root = await circuitRootForInfo(info);
@@ -699,7 +842,10 @@ async function scanDevices() {
       };
     }
   }));
-  return serialDevices.concat(deviceListOverride ? [] : await bootselDevices());
+  return serialDevices.concat(deviceListOverride ? [] : await bootselDevices())
+    .sort((a, b) => Number(!!a.bootMode) - Number(!!b.bootMode) ||
+      String(a.label || a.machine || a.dev).localeCompare(String(b.label || b.machine || b.dev)) ||
+      String(a.dev).localeCompare(String(b.dev)));
 }
 
 function logDeviceChanges(devices) {
@@ -716,17 +862,19 @@ function logDeviceChanges(devices) {
     if (!present.has(dev)) loggedDevices.delete(dev);
   }
   for (const device of devices) {
+    if (device.probing) continue;
     const signature = [device.ok, device.firmware, device.machine, device.release, device.uid, device.error].join('|');
     if (loggedDevices.get(device.dev) === signature) continue;
     loggedDevices.set(device.dev, signature);
     if (device.bootMode) {
-      console.log('device found: ' + device.machine + ' · BOOTSEL firmware-install mode');
+      console.log('device found: ' + device.machine + (device.bootloader === 'esp-rom'
+        ? ' · ROM download mode · ' + device.dev : ' · BOOTSEL firmware-install mode'));
     } else if (device.ok) {
       console.log('device found: ' + (device.machine || device.label) +
         ' · ' + device.firmwareLabel + ' ' + device.release + ' · serial ' + (device.uid || device.serial) +
         ' · ' + device.dev);
     } else {
-      console.log('device found: ' + device.dev + ' · identification failed: ' + device.error);
+      console.log('device found: ' + device.dev + ' · identification failed');
     }
   }
 }
@@ -1686,7 +1834,8 @@ function boardRecord(device) {
     record.boot_mode = true;
     record.chip = device.machine;
     record.mounted = !!device.mountRoot;
-    record.installable_firmware = ['micropython'];
+    record.installable_firmware = device.bootloader === 'esp-rom' ? [] : ['micropython'];
+    if (device.bootDetails) record.boot_details = device.bootDetails;
   }
   return record;
 }
@@ -1780,8 +1929,8 @@ const destructiveAnnotations = { readOnlyHint: false, destructiveHint: true, ope
 const MCP_TOOLS = [
   {
     name: 'pico_boards_list',
-    title: 'List connected Pico boards',
-    description: 'List connected MicroPython and CircuitPython boards and their capabilities. Use board_id from this result in every other tool.',
+    title: 'List connected boards',
+    description: 'List connected Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython and report their capabilities. Use board_id from this result in every other tool.',
     inputSchema: { type: 'object', additionalProperties: false },
     annotations: readOnlyAnnotations,
     handler: async (raw) => {
@@ -2061,7 +2210,7 @@ async function dispatchMcp(msg) {
         resultType: 'complete',
         supportedVersions: [MCP_PROTOCOL],
         capabilities: MCP_CAPABILITIES,
-        instructions: 'Manage locally connected MicroPython and CircuitPython boards. Call pico_boards_list before using a board-specific tool.',
+        instructions: 'Manage connected Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython. Call pico_boards_list before using a board-specific tool.',
         ttlMs: 300000,
         cacheScope: 'public',
         _meta: { 'io.modelcontextprotocol/serverInfo': MCP_SERVER_INFO },
@@ -2272,8 +2421,16 @@ function createServer(options = {}) {
 
     // Return cached metadata for attached boards.
     if (p === '/api/devices') {
-      if (q.manual === '1') console.log('scanning for devices…');
-      const list = await scanDevices();
+      if (q.manual === '1') {
+        console.log('scanning for devices…');
+        for (const port of ports.values()) {
+          if (port instanceof PicoPort && !port.busy && !port.probePromise) {
+            port.info = null;
+            port.probeFailure = null;
+          }
+        }
+      }
+      const list = await scanDevices({ waitForProbes: false });
       if (logDevices) logDeviceChanges(list);
       sendJSON(res, 200, {
         devices: list,
@@ -2581,6 +2738,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  espSlipEncode,
+  espSlipDecode,
+  espRomCommand,
+  detectEspBootloader,
   FIRMWARE_ADAPTERS,
   cleanPath,
   cleanReplOutput,

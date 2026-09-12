@@ -110,6 +110,185 @@ function fakePort(info) {
   };
 }
 
+describe('serial discovery', () => {
+  test('discovers macOS USB modem and USB serial callout ports, and Linux USB ports', t => {
+    t.mock.method(fs, 'readdirSync', directory => {
+      assert.equal(directory, '/dev');
+      return [
+        'cu.usbserial-110', 'cu.usbmodem123',
+        'tty.usbserial-110', 'tty.usbmodem123',
+        'cu.Bluetooth-Incoming-Port', 'cu.debug-console',
+        'ttyUSB0', 'ttyACM0', 'ttyS0',
+      ];
+    });
+    assert.deepEqual(viewer.listDevs('darwin'), [
+      '/dev/cu.usbmodem123', '/dev/cu.usbserial-110',
+    ]);
+    assert.deepEqual(viewer.listDevs('linux'), ['/dev/ttyACM0', '/dev/ttyUSB0']);
+  });
+});
+
+describe('ESP ROM detection', () => {
+  after(() => viewer._test.clearDevices());
+
+  function romPort({ modernId, magic = 0x00f01d83, denyMac = false, stub = false } = {}) {
+    const port = viewer.getPort('/dev/test-esp-' + Math.random());
+    const requests = [];
+    port._open = () => {};
+    port._close = () => {};
+    port._enterRaw = async () => { throw new Error('not a Python REPL'); };
+    port.write = async wire => {
+      const request = viewer.espSlipDecode(Buffer.from(wire, 'binary').subarray(1, -1));
+      requests.push(request);
+      assert.equal(request[0], 0);
+      assert.equal(request.readUInt16LE(2), request.length - 8);
+      assert.equal(request.readUInt32LE(4), 0);
+      const opcode = request[1];
+      assert.ok([8, 10, 20].includes(opcode), 'only read-only bootloader commands');
+      let value = 0;
+      let payload = Buffer.alloc(0);
+      let error = false;
+      if (opcode === 8) {
+        assert.equal(request.subarray(8).toString('hex'), '07071220' + '55'.repeat(32));
+        value = stub ? 0 : 0x20120707;
+      } else if (opcode === 20) {
+        error = modernId === undefined;
+        if (!error) { payload = Buffer.alloc(20); payload.writeUInt32LE(modernId, 12); }
+      } else {
+        const address = request.readUInt32LE(8);
+        if (address === 0x40001000) value = magic;
+        else if (address === 0x3ff5a004) { value = 0x12c0db34; error = denyMac; }
+        else if (address === 0x3ff5a008) value = 0x0000246f;
+        else assert.fail('unexpected register read');
+      }
+      const response = Buffer.alloc(12 + payload.length);
+      response[0] = 1;
+      response[1] = opcode;
+      response.writeUInt16LE(payload.length + 4, 2);
+      response.writeUInt32LE(value, 4);
+      payload.copy(response, 8);
+      if (error) { response[response.length - 4] = 1; response[response.length - 3] = 5; }
+      const framed = viewer.espSlipEncode(response).toString('binary');
+      // Exercise the real receive buffer with noise, empty delimiters, and split replies.
+      port._onData('boot log\r\n\xc0' + framed.slice(0, 5));
+      setImmediate(() => port._onData(framed.slice(5) + (opcode === 8 ? framed.repeat(7) : '')));
+    };
+    return { port, requests };
+  }
+
+  test('encodes SLIP bytes and rejects invalid escapes', () => {
+    assert.equal(viewer.espSlipEncode(Buffer.from([0xc0, 0xdb, 1])).toString('hex'), 'c0dbdcdbdd01c0');
+    assert.deepEqual(viewer.espSlipDecode(Buffer.from('dbdcdbdd01', 'hex')), Buffer.from([0xc0, 0xdb, 1]));
+    assert.throws(() => viewer.espSlipDecode(Buffer.from([0xdb])));
+    assert.throws(() => viewer.espSlipDecode(Buffer.from([0xdb, 0])));
+  });
+
+  test('falls back from Python to ROM detection, retains MAC bytes, and caches the result', async () => {
+    const { port, requests } = romPort();
+    const board = await viewer.probe(port.dev);
+    assert.equal(board.machine, 'ESP32');
+    assert.equal(board.bootMode, true);
+    assert.equal(board.bootDetails.mac, '24:6f:12:c0:db:34');
+    assert.deepEqual(board.capabilities, { read: false, write: false, run: false, console: false });
+    const count = requests.length;
+    assert.equal(await viewer.probe(port.dev), board);
+    assert.equal(requests.length, count, 'polls must not keep probing a cached board');
+    assert.equal(port.busy, false);
+    assert.equal(port.inCommand, false);
+    assert.equal(port.halted, false);
+    viewer._test.setDevices([{ dev: port.dev, port }]);
+    try {
+      const response = await viewer.dispatchMcp({
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'pico_boards_list', arguments: {} },
+      });
+      const record = response.result.structuredContent.boards[0];
+      assert.equal(record.boot_mode, true);
+      assert.deepEqual(record.installable_firmware, []);
+      assert.equal(record.boot_details.mac, board.bootDetails.mac);
+    } finally { viewer._test.clearDevices(); }
+  });
+
+  test('identifies S2, C3, and S3 and preserves unknown chip IDs without guessing', async () => {
+    for (const [options, name] of [
+      [{ magic: 0x000007c6 }, 'ESP32-S2'],
+      [{ modernId: 5 }, 'ESP32-C3'],
+      [{ modernId: 9 }, 'ESP32-S3'],
+      [{ modernId: 999 }, 'Espressif chip (unidentified)'],
+    ]) {
+      const { port } = romPort(options);
+      const board = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+      assert.equal(board.machine, name);
+      if (options.modernId !== undefined) assert.equal(board.bootDetails.chipId, options.modernId);
+    }
+  });
+
+  test('retains identification when optional reads fail and rejects a running stub', async () => {
+    const { port } = romPort({ denyMac: true });
+    const board = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    assert.equal(board.machine, 'ESP32');
+    assert.equal(board.bootDetails.mac, undefined);
+    const stub = romPort({ stub: true }).port;
+    assert.equal(await stub.command(viewer.detectEspBootloader, { rawRepl: false }), null);
+  });
+
+  test('stops repeated Python retries and caches failed identification', async () => {
+    const { port } = romPort({ stub: true });
+    let attempts = 0;
+    port._enterRaw = async () => { attempts++; throw new Error('RTCWDT_RTC_RESET'); };
+    await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
+    await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
+    assert.equal(attempts, 1);
+    assert.equal(port.probePromise, null);
+    port.probeFailure.retryAt = 0;
+    await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
+    assert.equal(attempts, 2);
+  });
+
+  test('returns healthy boards while another probe is pending and coalesces polls', async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let commands = 0;
+    const slow = {
+      info: null, probePromise: null,
+      async command(fn) { commands++; await gate; return fn(this); },
+      async exec(code) {
+        return { out: code.includes('PVI_IMPL') ? 'PVI_IMPL micropython\r\n'
+          : 'PVI_DETAILS 4553503332 1.28.0 aabbccdd 1\r\n', err: '' };
+      },
+    };
+    const healthy = firmwareInfo('micropython', false);
+    viewer._test.setDevices([
+      { dev: healthy.dev, port: fakePort(healthy) },
+      { dev: '/dev/slow', port: slow },
+    ]);
+    try {
+      for (let i = 0; i < 2; i++) {
+        const devices = await viewer.scanDevices({ waitForProbes: false });
+        assert.equal(devices.find(device => device.dev === healthy.dev).ok, true);
+        assert.equal(devices.find(device => device.dev === '/dev/slow').probing, true);
+      }
+      assert.equal(commands, 1);
+      release();
+      await viewer.probe('/dev/slow');
+      const devices = await viewer.scanDevices({ waitForProbes: false });
+      const identified = devices.find(device => device.dev === '/dev/slow');
+      assert.equal(identified.ok, true);
+      assert.equal(identified.machine, 'ESP32');
+    } finally { release(); viewer._test.clearDevices(); }
+  });
+
+  test('ignores malformed, echoed and wrong-opcode packets; times out and rejects mutations', async () => {
+    const port = viewer.getPort('/dev/test-esp-malformed');
+    port.inCommand = true;
+    port.write = async () => port._onData('\xc0\xdb\x00\xc0\x00\x08\x02\x00\x00\x00\x00\x00\x00\x00\xc0\x01\x0a\x02\x00\x00\x00\x00\x00\x00\x00\xc0');
+    await assert.rejects(viewer.espRomCommand(port, 8, Buffer.alloc(0), 20), /timed out|No matching/);
+    assert.equal(port.capture, null);
+    await assert.rejects(viewer.espRomCommand(port, 2), /Unsupported/);
+    port.inCommand = false;
+  });
+});
+
 describe('pure helpers', () => {
   test('prints CLI help and version without starting the server', () => {
     const help = spawnSync(process.execPath, ['pico-bay.js', '--help'], {
@@ -278,6 +457,30 @@ describe('pure helpers', () => {
     assert.deepEqual(viewer.bootselFirmwareOptions('RP2350').map(option => option.id), ['pico2', 'pico2-w']);
   });
 
+  test('sorts connected boards by name with bootloader devices last', async () => {
+    const normalA = { ...firmwareInfo('micropython', false), dev: '/dev/z', label: 'Alpha', machine: 'Alpha' };
+    const normalZ = { ...firmwareInfo('circuitpython', true), dev: '/dev/a', label: 'Zulu', machine: 'Zulu' };
+    const bootA = {
+      ...normalA, dev: '/dev/boot-a', label: 'ESP32', machine: 'ESP32',
+      bootMode: true, bootloader: 'esp-rom', firmware: 'esp-bootloader',
+    };
+    const bootZ = {
+      ...normalA, dev: 'bootsel:/dev/z', label: 'RP2350', machine: 'RP2350',
+      bootMode: true, firmware: 'bootsel',
+    };
+    viewer._test.setDevices([
+      { dev: bootZ.dev, port: fakePort(bootZ) },
+      { dev: normalZ.dev, port: fakePort(normalZ) },
+      { dev: bootA.dev, port: fakePort(bootA) },
+      { dev: normalA.dev, port: fakePort(normalA) },
+    ]);
+    try {
+      assert.deepEqual((await viewer.scanDevices()).map(device => device.label), [
+        'Alpha', 'Zulu', 'ESP32', 'RP2350',
+      ]);
+    } finally { viewer._test.clearDevices(); }
+  });
+
   test('matches mounted CircuitPython folders from their boot UID', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'pico-bay-mounts-'));
     const first = path.join(base, 'CIRCUITPY');
@@ -418,16 +621,17 @@ describe('pure helpers', () => {
     }
 
     viewer._test.setDevices([
-      { dev: '/dev/board-a', port: probePort('micropython', 'Pico W', '1.25.0', 'aaaa1111') },
+      { dev: '/dev/board-a', port: probePort('micropython', 'Generic ESP32 module with ESP32', '1.25.0', 'aaaa1111') },
       { dev: '/dev/board-b', port: probePort('circuitpython', 'Pico 2 W', '10.2.1', 'bbbb2222', true) },
     ]);
     try {
       const boards = await viewer.scanDevices();
       assert.equal(maxActive, 2);
       assert.deepEqual(boards.map(board => [board.firmware, board.machine, board.release, board.uid]), [
-        ['micropython', 'Pico W', '1.25.0', 'aaaa1111'],
+        ['micropython', 'Generic ESP32 module with ESP32', '1.25.0', 'aaaa1111'],
         ['circuitpython', 'Pico 2 W', '10.2.1', 'bbbb2222'],
       ]);
+      assert.deepEqual(boards.map(board => board.label), ['ESP32', 'Pico 2 W']);
       assert.equal(boards[1].readOnly, false);
       assert.equal(boards[1].capabilities.write, true);
     } finally {

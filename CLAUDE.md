@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working in this repository.
 
 ## What this is
 
-`pico-bay` is a local web UI and MCP server for managing MicroPython and CircuitPython boards over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode.
+`pico-bay` is an app and MCP server for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode.
 
 The app uses only Node.js built-in modules at runtime and has no build step. The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
 
