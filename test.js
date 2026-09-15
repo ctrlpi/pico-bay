@@ -11,17 +11,58 @@ function formatMilliseconds(value) {
   return milliseconds.toPrecision(1);
 }
 
+function formatReporterLine(line, color) {
+  line = line
+    .replace(/(\()([0-9]+(?:\.[0-9]+)?)ms\)/g,
+      (_match, opening, value) => opening + formatMilliseconds(value) + 'ms)')
+    .replace(/(duration_ms\s+)([0-9]+(?:\.[0-9]+)?)/g,
+      (_match, _label, value) => 'duration ' + formatMilliseconds(value) + ' ms');
+  const plain = line.replace(/\x1b\[[0-9;]*m/g, '');
+  const paint = (text, code) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
+  if (plain === '*** Optional physical boards tests') return paint(plain, '1;34');
+  const noBoards = ' # no serial boards connected';
+  if (plain.includes(noBoards)) {
+    const indent = plain.match(/^\s*/)[0];
+    return plain.slice(0, plain.indexOf(noBoards)) + '\n' +
+      paint(indent + '*** no serial boards connected', '38;5;208');
+  }
+  const summary = plain.match(/^ℹ (tests|suites|pass|fail|cancelled|skipped|todo|duration)\s+(\d+)/);
+  if (summary) {
+    const [, label, count] = summary;
+    const code = label === 'skipped' && Number(count) > 0 ? '38;5;208'
+      : ['fail', 'cancelled'].includes(label) && Number(count) > 0 ? '31' : '32';
+    return paint(plain, code);
+  }
+  if (/^\s*✔ .* on \/dev\//.test(plain)) return paint(plain, '38;5;28');
+  return line;
+}
+
 if (require.main !== module) {
   module.exports = async function* roundedSpecReporter(source) {
     const reporter = spec();
-    Readable.from(source).pipe(reporter);
-    for await (const chunk of reporter) {
-      yield String(chunk)
-        .replace(/(\()([0-9]+(?:\.[0-9]+)?)ms\)/g,
-          (_match, opening, value) => opening + formatMilliseconds(value) + 'ms)')
-        .replace(/(duration_ms\s+)([0-9]+(?:\.[0-9]+)?)/g,
-          (_match, _label, value) => 'duration ' + formatMilliseconds(value) + ' ms');
+    const color = process.env.FORCE_COLOR !== undefined
+      ? process.env.FORCE_COLOR !== '0'
+      : !('NO_COLOR' in process.env) && !!process.stdout.isTTY;
+    async function* withPhysicalHeading() {
+      for await (const event of source) {
+        if (event.type === 'test:dequeue' && event.data.nesting === 0 &&
+            event.data.name === 'optional physical boards') {
+          yield { type: 'test:stdout', data: { message: '*** Optional physical boards tests\n' } };
+        }
+        yield event;
+      }
     }
+    Readable.from(withPhysicalHeading()).pipe(reporter);
+    let pending = '';
+    for await (const chunk of reporter) {
+      pending += String(chunk);
+      let newline;
+      while ((newline = pending.indexOf('\n')) !== -1) {
+        yield formatReporterLine(pending.slice(0, newline), color) + '\n';
+        pending = pending.slice(newline + 1);
+      }
+    }
+    if (pending) yield formatReporterLine(pending, color);
   };
 } else {
 const assert = require('node:assert/strict');
@@ -131,7 +172,49 @@ describe('serial discovery', () => {
 describe('ESP ROM detection', () => {
   after(() => viewer._test.clearDevices());
 
-  function romPort({ modernId, magic = 0x00f01d83, denyMac = false, stub = false } = {}) {
+  test('selects native USB reset for C3/S3 while preserving external UART reset', () => {
+    for (const machine of ['ESP32C3 module with ESP32-C3', 'ESP32-S3']) {
+      for (const dev of ['/dev/cu.usbmodem101', '/dev/ttyACM0']) {
+        assert.equal(viewer.espResetStrategies({ machine }, dev)[0], 'usb-jtag');
+      }
+      assert.equal(viewer.espResetStrategies({ machine }, '/dev/ttyUSB0')[0], 'tight');
+    }
+    assert.equal(viewer.espResetStrategies({ machine: 'ESP32' }, '/dev/cu.usbserial-0001')[0], 'tight');
+  });
+
+  function makeEspImage(chipId, content = Buffer.from('pico-bay ESP firmware test')) {
+    const cursor = 24 + 8 + content.length;
+    const checksumOffset = Math.ceil((cursor + 1) / 16) * 16 - 1;
+    const image = Buffer.alloc(checksumOffset + 33);
+    image[0] = 0xe9;
+    image[1] = 1;
+    image[3] = 0x20;
+    image.writeUInt16LE(chipId, 12);
+    image.writeUInt32LE(0x3f400020, 24);
+    image.writeUInt32LE(content.length, 28);
+    content.copy(image, 32);
+    image[checksumOffset] = viewer.espChecksum(content);
+    return image;
+  }
+
+  function withPartitionTable(image, firmware, entries) {
+    const tableOffset = 0x8000 - firmware.offset;
+    const combined = Buffer.alloc(Math.max(image.length, tableOffset + 0x1000), 0xff);
+    image.copy(combined);
+    entries.forEach((entry, index) => {
+      const offset = tableOffset + index * 32;
+      combined.writeUInt16LE(0x50aa, offset);
+      combined.writeUInt32LE(entry.offset, offset + 4);
+      combined.writeUInt32LE(entry.size, offset + 8);
+      combined.fill(0, offset + 12, offset + 28);
+      Buffer.from(entry.label || '', 'ascii').copy(combined, offset + 12, 0, 16);
+    });
+    return combined;
+  }
+
+  function romPort({ modernId, magic = 0x00f01d83, denyMac = false, stub = false, syncValue = 0x20120707,
+    allowFlash = false, flashedMd5 = '', securityFlags = 0, flashCryptCount = 0, flashFailures = 0,
+    refuseReboot = false, silentReboot = false, storageOffset = 0, storageMd5 = '' } = {}) {
     const port = viewer.getPort('/dev/test-esp-' + Math.random());
     const requests = [];
     port._open = () => {};
@@ -142,32 +225,51 @@ describe('ESP ROM detection', () => {
       requests.push(request);
       assert.equal(request[0], 0);
       assert.equal(request.readUInt16LE(2), request.length - 8);
-      assert.equal(request.readUInt32LE(4), 0);
       const opcode = request[1];
-      assert.ok([8, 10, 20].includes(opcode), 'only read-only bootloader commands');
+      assert.ok((allowFlash ? [2, 3, 4, 8, 10, 11, 13, 16, 17, 18, 19, 20] : [8, 10, 20]).includes(opcode),
+        allowFlash ? 'supported bootloader command' : 'only read-only bootloader commands');
+      if (opcode !== 3 && opcode !== 17) assert.equal(request.readUInt32LE(4), 0);
       let value = 0;
       let payload = Buffer.alloc(0);
       let error = false;
       if (opcode === 8) {
         assert.equal(request.subarray(8).toString('hex'), '07071220' + '55'.repeat(32));
-        value = stub ? 0 : 0x20120707;
+        value = stub ? 0 : syncValue;
       } else if (opcode === 20) {
         error = modernId === undefined;
-        if (!error) { payload = Buffer.alloc(20); payload.writeUInt32LE(modernId, 12); }
-      } else {
+        if (!error) {
+          payload = Buffer.alloc(20);
+          payload.writeUInt32LE(securityFlags, 0);
+          payload[4] = flashCryptCount;
+          payload.writeUInt32LE(modernId, 12);
+        }
+      } else if (opcode === 10) {
         const address = request.readUInt32LE(8);
         if (address === 0x40001000) value = magic;
         else if (address === 0x3ff5a004) { value = 0x12c0db34; error = denyMac; }
         else if (address === 0x3ff5a008) value = 0x0000246f;
+        else if (address === 0x3ff5a000 || address === 0x3ff5a018) value = 0;
         else assert.fail('unexpected register read');
+      } else if (opcode === 19) {
+        const address = request.readUInt32LE(8);
+        payload = Buffer.from(storageMd5 && address === storageOffset ? storageMd5 : flashedMd5, 'ascii');
+      } else if (opcode === 3 && flashFailures > 0) {
+        flashFailures--;
+        error = true;
+      } else if (opcode === 4 && refuseReboot) {
+        error = true;
       }
+      if (opcode === 4 && silentReboot) return;
       const response = Buffer.alloc(12 + payload.length);
       response[0] = 1;
       response[1] = opcode;
       response.writeUInt16LE(payload.length + 4, 2);
       response.writeUInt32LE(value, 4);
       payload.copy(response, 8);
-      if (error) { response[response.length - 4] = 1; response[response.length - 3] = 5; }
+      if (error) {
+        response[response.length - 4] = 1;
+        response[response.length - 3] = opcode === 4 ? 6 : 5;
+      }
       const framed = viewer.espSlipEncode(response).toString('binary');
       // Exercise the real receive buffer with noise, empty delimiters, and split replies.
       port._onData('boot log\r\n\xc0' + framed.slice(0, 5));
@@ -204,7 +306,8 @@ describe('ESP ROM detection', () => {
       });
       const record = response.result.structuredContent.boards[0];
       assert.equal(record.boot_mode, true);
-      assert.deepEqual(record.installable_firmware, []);
+      assert.deepEqual(record.installable_firmware, ['micropython']);
+      assert.equal(record.install_firmware.build, 'ESP32_GENERIC');
       assert.equal(record.boot_details.mac, board.bootDetails.mac);
     } finally { viewer._test.clearDevices(); }
   });
@@ -223,6 +326,14 @@ describe('ESP ROM detection', () => {
     }
   });
 
+  test('accepts variable ROM synchronization values from physical ESP32 boards', async () => {
+    for (const syncValue of [0x55201207, 0x55552012, 0x55551207]) {
+      const { port } = romPort({ syncValue });
+      const board = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+      assert.equal(board.machine, 'ESP32');
+    }
+  });
+
   test('retains identification when optional reads fail and rejects a running stub', async () => {
     const { port } = romPort({ denyMac: true });
     const board = await port.command(viewer.detectEspBootloader, { rawRepl: false });
@@ -238,11 +349,46 @@ describe('ESP ROM detection', () => {
     port._enterRaw = async () => { attempts++; throw new Error('RTCWDT_RTC_RESET'); };
     await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
     await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
-    assert.equal(attempts, 1);
+    assert.equal(attempts, 2);
     assert.equal(port.probePromise, null);
     port.probeFailure.retryAt = 0;
     await assert.rejects(viewer.probe(port.dev), /watchdog resets/);
-    assert.equal(attempts, 2);
+    assert.equal(attempts, 4);
+  });
+
+  test('retries identification once after two seconds without exposing the first failure', async () => {
+    const { port } = romPort();
+    const write = port.write;
+    let attempts = 0;
+    const started = Date.now();
+    port._enterRaw = async () => { attempts++; throw new Error('not ready'); };
+    port.write = async wire => {
+      if (attempts === 1) throw new Error('board is still starting');
+      return write(wire);
+    };
+    viewer._test.setDevices([{ dev: port.dev, port }]);
+    try {
+      const pending = viewer.probe(port.dev);
+      await new Promise(resolve => setImmediate(resolve));
+      for (let i = 0; i < 2; i++) {
+        const [device] = await viewer.scanDevices({ waitForProbes: false });
+        assert.equal(device.probing, true);
+        assert.equal(port.probeFailure, null);
+        assert.equal(attempts, 1);
+      }
+      const board = await pending;
+      assert.equal(board.machine, 'ESP32');
+      assert.equal(attempts, 2);
+      assert.ok(Date.now() - started >= 1900);
+      assert.equal(port.probeFailure, null);
+    } finally { viewer._test.clearDevices(); }
+  });
+
+  test('explains download-mode recovery when ESP flash headers are invalid', async () => {
+    const { port } = romPort({ stub: true });
+    port._enterRaw = async () => { throw new Error('invalid header: 0xffffffff'); };
+    await assert.rejects(viewer.probe(port.dev), /invalid flash header.*Hold BOOT.*3 seconds/);
+    assert.equal(port.probePromise, null);
   });
 
   test('returns healthy boards while another probe is pending and coalesces polls', async () => {
@@ -282,10 +428,259 @@ describe('ESP ROM detection', () => {
     const port = viewer.getPort('/dev/test-esp-malformed');
     port.inCommand = true;
     port.write = async () => port._onData('\xc0\xdb\x00\xc0\x00\x08\x02\x00\x00\x00\x00\x00\x00\x00\xc0\x01\x0a\x02\x00\x00\x00\x00\x00\x00\x00\xc0');
-    await assert.rejects(viewer.espRomCommand(port, 8, Buffer.alloc(0), 20), /timed out|No matching/);
+    await assert.rejects(viewer.espRomCommand(port, 8, Buffer.alloc(0), 20),
+      /ESP ROM did not respond to command 0x08/);
     assert.equal(port.capture, null);
-    await assert.rejects(viewer.espRomCommand(port, 2), /Unsupported/);
+    await assert.rejects(viewer.espRomCommand(port, 5), /Unsupported/);
     port.inCommand = false;
+  });
+
+  test('validates ESP images and maps supported MicroPython builds', () => {
+    const mappings = [
+      ['ESP32', 0, 0x1000, 'ESP32_GENERIC'],
+      ['ESP32-S2', 2, 0x1000, 'ESP32_GENERIC_S2'],
+      ['ESP32-C3', 5, 0, 'ESP32_GENERIC_C3'],
+      ['ESP32-S3', 9, 0, 'ESP32_GENERIC_S3'],
+    ];
+    for (const [chip, chipId, offset, build] of mappings) {
+      const firmware = viewer.espFirmwareForChip(chip);
+      assert.equal(firmware.chipId, chipId);
+      assert.equal(firmware.offset, offset);
+      assert.equal(firmware.build, build);
+      assert.equal(viewer.espImageInfo(makeEspImage(chipId), chipId).flashSize, 4 * 1024 * 1024);
+    }
+    assert.equal(viewer.espFirmwareForChip('ESP32-C6'), null);
+    const firmware = viewer.espFirmwareForChip('ESP32-S3');
+    assert.equal(viewer.resolveEspFirmwareUrl(firmware,
+      '<a href="/resources/firmware/ESP32_GENERIC_S3-v1.app-bin">app</a>' +
+      '<a href="/resources/firmware/ESP32_GENERIC_S3-20260824-v1.29.0.bin">bin</a>'),
+    'https://micropython.org/resources/firmware/ESP32_GENERIC_S3-20260824-v1.29.0.bin');
+    assert.throws(() => viewer.resolveEspFirmwareUrl(firmware,
+      '<a href="https://example.com/ESP32_GENERIC_S3-v1.bin">other host</a>'), /Could not find/);
+    assert.throws(() => viewer.espImageInfo(makeEspImage(5), 9), /different ESP32 chip/);
+    const corrupt = makeEspImage(0);
+    corrupt[40] ^= 1;
+    assert.throws(() => viewer.espImageInfo(corrupt, 0), /checksum/);
+    const hashed = makeEspImage(9);
+    hashed[23] = 1;
+    require('node:crypto').createHash('sha256').update(hashed.subarray(0, hashed.length - 32))
+      .digest().copy(hashed, hashed.length - 32);
+    assert.equal(viewer.espImageInfo(hashed, 9).hasSha256, true);
+    hashed[hashed.length - 1] ^= 1;
+    assert.throws(() => viewer.espImageInfo(hashed, 9), /SHA-256/);
+  });
+
+  test('resolves and downloads the latest stable combined ESP image', async () => {
+    const firmware = viewer.espFirmwareForChip('ESP32-S2');
+    const image = makeEspImage(2);
+    const seen = [];
+    const result = await viewer.downloadEspFirmware(firmware, async url => {
+      seen.push(url);
+      return url === firmware.page
+        ? Buffer.from('<a href="/resources/firmware/ESP32_GENERIC_S2-v1.app-bin">app</a>' +
+          '<a href="/resources/firmware/ESP32_GENERIC_S2-20260824-v1.29.0.bin">bin</a>')
+        : image;
+    });
+    assert.equal(result, image);
+    assert.deepEqual(seen, [
+      firmware.page,
+      'https://micropython.org/resources/firmware/ESP32_GENERIC_S2-20260824-v1.29.0.bin',
+    ]);
+  });
+
+  test('reports the failing firmware block and stops before verification or reboot', async () => {
+    const image = makeEspImage(0);
+    const { port, requests } = romPort({ allowFlash: true, flashFailures: 2 });
+    const device = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    await assert.rejects(port.command(active => viewer.flashEspImage(
+      active, device, viewer.espFirmwareForChip('ESP32'), image,
+    ), { rawRepl: false }), /command 0x03 \(error 0x05\).*block 1\/1, flash address 0x00001000, after 2 attempts/);
+    assert.equal(requests.filter(request => request[1] === 3).length, 2);
+    assert.ok(!requests.some(request => [4, 19].includes(request[1])));
+  });
+
+  test('writes, checksums, verifies, and reboots an ESP image through the ROM', async () => {
+    const image = makeEspImage(0, Buffer.alloc(1200, 0x5a));
+    const md5 = require('node:crypto').createHash('md5').update(image).digest('hex');
+    const { port, requests } = romPort({ allowFlash: true, flashedMd5: md5, flashFailures: 1 });
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    const device = port.info;
+    const progress = [];
+    const result = await port.command(active => viewer.flashEspImage(
+      active, device, viewer.espFirmwareForChip('ESP32'), image,
+      update => progress.push(update),
+    ), { rawRepl: false });
+    assert.equal(result.md5, md5);
+    const opcodes = requests.map(request => request[1]);
+    assert.ok(opcodes.includes(13), 'SPI_ATTACH sent');
+    assert.ok(opcodes.includes(11), 'SPI_SET_PARAMS sent');
+    assert.ok(opcodes.includes(2), 'FLASH_BEGIN sent');
+    assert.ok(opcodes.includes(3), 'FLASH_DATA sent');
+    assert.ok(opcodes.includes(19), 'SPI_FLASH_MD5 sent');
+    assert.equal(opcodes.at(-1), 4, 'FLASH_END reboots only after verification');
+    const begin = requests.find(request => request[1] === 2).subarray(8);
+    assert.deepEqual([
+      begin.readUInt32LE(0), begin.readUInt32LE(4), begin.readUInt32LE(8), begin.readUInt32LE(12),
+    ], [image.length, Math.ceil(image.length / 0x400), 0x400, 0x1000]);
+    for (const request of requests.filter(request => request[1] === 3)) {
+      const block = request.subarray(24);
+      assert.equal(request.readUInt32LE(4), viewer.espChecksum(block));
+      assert.equal(request.readUInt32LE(8), block.length);
+    }
+    assert.equal(progress.at(-1).stage, 'rebooting');
+    const writeProgress = progress.filter(update => update.stage === 'writing')
+      .map(update => update.percent);
+    assert.equal(writeProgress[0], 0);
+    assert.equal(writeProgress.at(-1), 100);
+    assert.deepEqual(writeProgress, [...writeProgress].sort((a, b) => a - b));
+  });
+
+  test('erases and verifies ESP32 storage when initialization is selected', async () => {
+    const firmware = viewer.espFirmwareForChip('ESP32');
+    const image = withPartitionTable(makeEspImage(0), firmware, [
+      { offset: 0x9000, size: 0x6000, label: 'nvs' },
+      { offset: 0x10000, size: 0x1f0000, label: 'factory' },
+      { offset: 0x200000, size: 0x200000, label: 'vfs' },
+    ]);
+    const storage = { offset: 0x200000, size: 0x200000 };
+    const imageMd5 = require('node:crypto').createHash('md5').update(image).digest('hex');
+    const storageMd5 = require('node:crypto').createHash('md5')
+      .update(Buffer.alloc(storage.size, 0xff)).digest('hex');
+    const { port, requests } = romPort({
+      allowFlash: true, flashedMd5: imageMd5,
+      storageOffset: storage.offset, storageMd5,
+    });
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    const progress = [];
+    const result = await port.command(active => viewer.flashEspImage(
+      active, port.info, firmware, image,
+      update => progress.push(update), { initializeStorage: true },
+    ), { rawRepl: false });
+
+    assert.deepEqual(result.storage, storage);
+    assert.deepEqual(viewer.espStorageRange(image, firmware, 4 * 1024 * 1024), storage);
+    const releaseLayout = withPartitionTable(makeEspImage(0), firmware, [
+      { offset: 0x9000, size: 0x6000, label: 'nvs' },
+      { offset: 0xf000, size: 0x1000, label: 'phy_init' },
+      { offset: 0x10000, size: 0x1f0000, label: 'factory' },
+    ]);
+    assert.deepEqual(viewer.espStorageRange(releaseLayout, firmware, 4 * 1024 * 1024), storage);
+    const opcodes = requests.map(request => request[1]);
+    assert.ok(opcodes.indexOf(16) > opcodes.indexOf(19), 'storage is erased only after firmware verification');
+    assert.ok(opcodes.lastIndexOf(19) < opcodes.indexOf(4), 'storage verification completes before reboot');
+    assert.ok(opcodes.includes(17), 'compressed blank data is sent');
+    assert.equal(opcodes.includes(18), false, 'do not exit the ROM before storage verification');
+    const compressed = Buffer.concat(requests.filter(request => request[1] === 17).map(request => {
+      const length = request.readUInt32LE(8);
+      const block = request.subarray(24, 24 + length);
+      assert.ok(length > 0 && length <= 0x400);
+      assert.equal(request.readUInt32LE(4), viewer.espChecksum(block));
+      return block;
+    }));
+    const blank = require('node:zlib').inflateSync(compressed);
+    assert.deepEqual(compressed, require('node:zlib').deflateSync(blank, { level: 9 }), 'no padding after compressed data');
+    assert.equal(blank.length, storage.size);
+    assert.equal(blank.every(byte => byte === 0xff), true);
+    const storageMd5Request = requests.find(request =>
+      request[1] === 19 && request.readUInt32LE(8) === storage.offset);
+    assert.equal(storageMd5Request.readUInt32LE(12), storage.size);
+    const initializationProgress = progress.filter(update => update.stage === 'initializing').map(update => update.percent);
+    assert.equal(initializationProgress[0], 0);
+    assert.equal(initializationProgress.at(-1), 100);
+    assert.ok(initializationProgress.some(percent => percent > 0 && percent < 100));
+  });
+
+  test('does not reboot when ESP flash verification fails', async () => {
+    const image = makeEspImage(5, Buffer.alloc(1100, 0xa5));
+    const { port, requests } = romPort({ modernId: 5, allowFlash: true, flashedMd5: '0'.repeat(32) });
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    const device = port.info;
+    await assert.rejects(port.command(active => viewer.flashEspImage(
+      active, device, viewer.espFirmwareForChip('ESP32-C3'), image,
+    ), { rawRepl: false }), /verification failed/);
+    assert.equal(requests.some(request => request[1] === 4), false);
+  });
+
+  test('keeps a verified install successful when the ROM cannot reboot itself', async () => {
+    const image = makeEspImage(0, Buffer.alloc(1100, 0x33));
+    const md5 = require('node:crypto').createHash('md5').update(image).digest('hex');
+    for (const resetOptions of [{ refuseReboot: true }, { silentReboot: true }]) {
+      const { port } = romPort({ allowFlash: true, flashedMd5: md5, ...resetOptions });
+      port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+      const result = await port.command(active => viewer.flashEspImage(
+        active, port.info, viewer.espFirmwareForChip('ESP32'), image,
+      ), { rawRepl: false });
+      assert.equal(result.md5, md5);
+      assert.equal(result.rebooted, false);
+    }
+  });
+
+  test('hard-resets ESP32 UART and native USB after verification and retains the startup session', async () => {
+    for (const [chipId, chip, dev, resetMode] of [
+      [0, 'ESP32', '/dev/ttyUSB0', 'normal'], [5, 'ESP32-C3', '/dev/ttyACM0', 'usb-normal'],
+    ]) {
+    const image = makeEspImage(chipId);
+    const md5 = require('node:crypto').createHash('md5').update(image).digest('hex');
+    const { port, requests } = romPort({ modernId: chipId || undefined, allowFlash: true, flashedMd5: md5 });
+    port.dev = dev;
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    let resets = 0, closes = 0;
+    port._close = () => { closes++; };
+    port.fd = 42;
+    const result = await port.command(active => viewer.flashEspImage(
+      active, port.info, viewer.espFirmwareForChip(chip), image, () => {}, {
+        resetLines: async (_fd, mode) => {
+          resets++;
+          assert.equal(mode, resetMode);
+          assert.equal(requests.at(-1)[1], 19, 'reset directly after MD5 verification');
+          assert.ok(requests.some(request => request[1] === 19), 'firmware verified first');
+        },
+      },
+    ), { rawRepl: false });
+    assert.equal(result.rebooted, true);
+    assert.equal(resets, 1);
+    assert.equal(closes, 0);
+    assert.equal(port.info, null);
+    assert.ok(port.rebootingUntil > Date.now());
+    port.fd = null;
+    }
+  });
+
+  test('falls back to ROM reboot when hardware reset control is unavailable', async () => {
+    const { port, requests } = romPort({ allowFlash: true });
+    port.fd = 42;
+    try {
+      assert.equal(await port.command(active => viewer.rebootEspAfterInstall(active, { machine: 'ESP32' },
+        async () => { throw new Error('no control lines'); }), { rawRepl: false }), true);
+      assert.equal(requests.at(-1)[1], 4);
+      assert.equal(requests.at(-1).readUInt32LE(8), 0);
+    } finally { port.fd = null; }
+  });
+
+  test('refuses protected ESP chips before issuing a flash command', async () => {
+    const image = makeEspImage(5);
+    const { port, requests } = romPort({ modernId: 5, allowFlash: true, securityFlags: 1 });
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    const device = port.info;
+    await assert.rejects(port.command(active => viewer.flashEspImage(
+      active, device, viewer.espFirmwareForChip('ESP32-C3'), image,
+    ), { rawRepl: false }), /security enabled/);
+    assert.equal(requests.some(request => [2, 3, 4, 11, 13, 19].includes(request[1])), false);
+  });
+
+  test('prevents two ESP installations from sharing one serial port', async () => {
+    const image = makeEspImage(0, Buffer.alloc(1050, 0x11));
+    const md5 = require('node:crypto').createHash('md5').update(image).digest('hex');
+    const { port } = romPort({ allowFlash: true, flashedMd5: md5 });
+    port.info = await port.command(viewer.detectEspBootloader, { rawRepl: false });
+    viewer._test.setDevices([{ dev: port.dev, port }]);
+    let releasePage;
+    const page = new Promise(resolve => { releasePage = resolve; });
+    const download = async url => url.endsWith('/') ? page : image;
+    const first = viewer.installEspFirmware(port.dev, download);
+    await assert.rejects(viewer.installEspFirmware(port.dev, download), /already running/);
+    releasePage(Buffer.from('<a href="/resources/firmware/ESP32_GENERIC-20260824-v1.29.0.bin">bin</a>'));
+    assert.equal((await first).ok, true);
   });
 });
 
@@ -428,6 +823,41 @@ describe('pure helpers', () => {
     ]);
   });
 
+  test('waits for Linux device metadata and scans even when udevadm is unavailable', async () => {
+    for (const unavailable of [false, true]) {
+      const calls = [];
+      const result = await viewer.linuxBlockDevices(async (command, args, options) => {
+        calls.push(command);
+        assert.ok(options.timeout <= 3000);
+        if (command === 'udevadm') {
+          assert.ok(args.includes('--timeout=2'));
+          if (unavailable) throw new Error('udevadm not found');
+          return '';
+        }
+        assert.ok(args.includes('--tree'), 'inherit serial numbers from parent disks');
+        assert.match(args.at(-1), /MOUNTPOINT$/);
+        return '{"blockdevices":[]}';
+      });
+      assert.deepEqual(calls, ['udevadm', 'lsblk']);
+      assert.equal(result, '{"blockdevices":[]}');
+    }
+  });
+
+  test('recognizes mounted and unmounted Pico volumes with legacy Linux mountpoint fields', () => {
+    const output = JSON.stringify({ blockdevices: [
+      { path: '/dev/sda', serial: 'pico-id', children: [
+        { path: '/dev/sda1', label: 'RPI-RP2', mountpoint: '/media/pi/RPI-RP2' },
+      ] },
+      { path: '/dev/sdb1', label: 'RP2350', mountpoint: null },
+      { path: '/dev/sdc1', label: 'CIRCUITPY', fstype: 'vfat', mountpoint: '/media/pi/CIRCUITPY' },
+      { path: '/dev/sdd1', label: 'CIRCUITPY', fstype: 'vfat', serial: 'circuit-id', mountpoint: null },
+    ] });
+    assert.deepEqual(viewer.parseBootselBlockDevices(output).map(board => [board.mountRoot, board.uid]),
+      [['/media/pi/RPI-RP2', 'pico-id'], [null, '']]);
+    assert.deepEqual(viewer.parseLinuxCircuitPartitions(output), ['/dev/sdd1']);
+    assert.deepEqual([...viewer.parseLinuxUnmountedCircuitVolumes(output)], [['circuit-id', '/dev/sdd1']]);
+  });
+
   test('finds unmounted Linux CircuitPython partitions', () => {
     const output = JSON.stringify({ blockdevices: [
       { path: '/dev/sda', serial: 'AABBCCDD' },
@@ -438,6 +868,37 @@ describe('pure helpers', () => {
     assert.deepEqual(viewer.parseLinuxCircuitPartitions(output), ['/dev/sda1']);
     assert.deepEqual([...viewer.parseLinuxUnmountedCircuitVolumes(output)], [['aabbccdd', '/dev/sda1']]);
     assert.deepEqual(viewer.parseLinuxCircuitPartitions('invalid'), []);
+  });
+
+  test('BOOTSEL feedback accepts any detected BOOTSEL board', async () => {
+    const html = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8');
+    const start = html.indexOf('  async function waitForBootsel(');
+    const end = html.indexOf('  async function doBootloader()', start);
+    let scans = 0;
+    const context = require('node:vm').createContext({
+      devices: [],
+      setTimeout: resolve => resolve(),
+      loadDevices: async () => { scans++; },
+    });
+    require('node:vm').runInContext(html.slice(start, end), context);
+    const source = { dev: '/dev/cu.usbmodem1', uid: 'e6601234' };
+    for (const uid of ['OTHER', 'E6601234', '']) {
+      const bootsel = { firmware: 'bootsel', dev: 'bootsel:/Volumes/RPI-RP2', uid };
+      context.devices = [source, bootsel];
+      scans = 0;
+      assert.equal(await context.waitForBootsel(), bootsel);
+      assert.equal(scans, 1, 'an existing BOOTSEL board is accepted immediately');
+    }
+    context.devices = [source];
+    scans = 0;
+    assert.equal(await context.waitForBootsel(), null);
+    assert.equal(scans, 15, 'waits for BOOTSEL before reporting failure');
+    scans = 0;
+    context.loadDevices = async () => {
+      if (++scans === 3) context.devices.push({ firmware: 'bootsel' });
+    };
+    assert.equal((await context.waitForBootsel()).firmware, 'bootsel');
+    assert.equal(scans, 3);
   });
 
   test('identifies RP2040 and RP2350 BOOTSEL storage', () => {
@@ -455,6 +916,94 @@ describe('pure helpers', () => {
     assert.ok(devices.every(device => device.bootMode && !device.capabilities.read));
     assert.deepEqual(viewer.bootselFirmwareOptions('RP2040').map(option => option.id), ['pico', 'pico-w']);
     assert.deepEqual(viewer.bootselFirmwareOptions('RP2350').map(option => option.id), ['pico2', 'pico2-w']);
+  });
+
+  test('finds multiple macOS BOOTSEL mounts with numbered volume names', () => {
+    const mounts = [
+      '/dev/disk4s1 on /Volumes/RPI-RP2 (msdos, local)',
+      '/dev/disk5s1 on /Volumes/RPI-RP2 1 (msdos, local)',
+      '/dev/disk6 on /Volumes/RP2350 2 (msdos, local)',
+      '/dev/disk7s1 on /Volumes/RPI-RP2-backup (msdos, local)',
+      '/dev/disk8s1 on /Volumes/CIRCUITPY (msdos, local)',
+    ].join('\n');
+    const boards = viewer.parseDarwinBootselVolumes(mounts);
+    assert.deepEqual(boards.map(board => [board.machine, board.mountRoot]), [
+      ['RP2040', '/Volumes/RPI-RP2'], ['RP2040', '/Volumes/RPI-RP2 1'], ['RP2350', '/Volumes/RP2350 2'],
+    ]);
+    assert.equal(new Set(boards.map(board => board.dev)).size, 3);
+    assert.deepEqual(viewer.parseDarwinBootselVolumes(''), []);
+  });
+
+  function makeUf2(family = 0xe48bff56, count = 2) {
+    const image = Buffer.alloc(count * 512);
+    for (let i = 0; i < count; i++) {
+      const block = image.subarray(i * 512, (i + 1) * 512);
+      [0x0a324655, 0x9e5d5157, 0x2000, 0x10000000 + i * 256, 256, i, count, family]
+        .forEach((value, index) => block.writeUInt32LE(value, index * 4));
+      block.writeUInt32LE(0x0ab16f30, 508);
+    }
+    return image;
+  }
+
+  test('validates all UF2 blocks, chip families, counts, payloads, and RP2350 prefix', () => {
+    assert.doesNotThrow(() => viewer.validateUf2Image(makeUf2(), 'RP2040'));
+    for (const family of [0xe48bff59, 0xe48bff5a, 0xe48bff5b]) {
+      assert.doesNotThrow(() => viewer.validateUf2Image(makeUf2(family), 'RP2350'));
+    }
+    const bad = [Buffer.alloc(512), makeUf2().subarray(0, 513), makeUf2().subarray(0, 512)];
+    for (const [offset, value] of [[512, 0], [1020, 0], [8, 0], [28, 123], [16, 480],
+      [16, 0], [12, 0x20000000], [12, 0x10000001], [532, 0], [536, 3], [524, 0x10000000]]) {
+      const image = makeUf2();
+      image.writeUInt32LE(value, offset);
+      bad.push(image);
+    }
+    for (const image of bad) assert.throws(() => viewer.validateUf2Image(image, 'RP2040'), /Invalid UF2/);
+    assert.throws(() => viewer.validateUf2Image(makeUf2(), 'RP2350'), /family/);
+    const reordered = makeUf2();
+    assert.doesNotThrow(() => viewer.validateUf2Image(Buffer.concat([
+      reordered.subarray(512), reordered.subarray(0, 512),
+    ]), 'RP2040'));
+    const prefix = makeUf2(0xe48bff57).subarray(0, 512);
+    prefix.writeUInt32LE(0xa000, 8);
+    prefix.writeUInt32LE(0x10ffff00, 12);
+    prefix.fill(0xef, 32, 288);
+    prefix.writeUInt32LE(0x9957e304, 288);
+    assert.doesNotThrow(() => viewer.validateUf2Image(Buffer.concat([prefix, makeUf2(0xe48bff59)]), 'RP2350'));
+    assert.throws(() => viewer.validateUf2Image(prefix, 'RP2350'), /no firmware/);
+    prefix[32] = 0;
+    assert.throws(() => viewer.validateUf2Image(Buffer.concat([prefix, makeUf2(0xe48bff59)]), 'RP2350'), /prefix/);
+  });
+
+  test('reports each BOOTSEL installation stage while copying firmware', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pico-bay-bootsel-progress-'));
+    const image = makeUf2();
+    const device = {
+      dev: 'bootsel:/dev/test-progress', machine: 'RP2040', mountRoot: root,
+    };
+    const progress = [];
+    viewer._test.setBootselDevices([device]);
+    try {
+      const result = await viewer.installBootselFirmware(
+        device.dev, 'pico-w', async () => image,
+        update => progress.push(update),
+      );
+      assert.equal(result.firmware, 'Raspberry Pi Pico W');
+      assert.deepEqual(progress.map(update => update.stage), [
+        'downloading', 'validating', 'writing', 'rebooting',
+      ]);
+      assert.equal(fs.readFileSync(path.join(root, 'rp2-pico-w-latest.uf2')).equals(image), true);
+      const malformed = Buffer.from(image);
+      malformed.writeUInt32LE(0, 1020);
+      progress.length = 0;
+      await assert.rejects(viewer.installBootselFirmware(device.dev, 'pico-w', async () => malformed,
+        update => progress.push(update)), /Invalid UF2/);
+      assert.ok(!progress.some(update => update.stage === 'writing'));
+      assert.ok(fs.readFileSync(path.join(root, 'rp2-pico-w-latest.uf2')).equals(image),
+        'invalid downloads leave the existing file unchanged');
+    } finally {
+      viewer._test.clearDevices();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test('sorts connected boards by name with bootloader devices last', async () => {
@@ -560,6 +1109,132 @@ describe('pure helpers', () => {
     assert.equal(port.info, null);
     assert.equal(port.capture, null);
     viewer._test.clearDevices();
+  });
+
+  test('keeps the event loop responsive while a USB serial close is stalled', async t => {
+    let finishClose;
+    t.mock.method(fs, 'close', (_fd, callback) => { finishClose = callback; });
+    const port = viewer.getPort('/dev/test-stalled-close');
+    port.fd = 42;
+    port._close();
+    assert.equal(port.fd, null);
+    assert.equal(port.closing, true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.throws(() => port._open(), /still closing/);
+    await assert.rejects(port._waitForClose(20), /still closing/);
+    finishClose(null);
+    assert.equal(port.closing, false);
+    viewer._test.clearDevices();
+  });
+
+  test('waits for an in-flight serial close before starting the next command', async t => {
+    let finishClose;
+    t.mock.method(fs, 'close', (_fd, callback) => { finishClose = callback; });
+    const port = viewer.getPort('/dev/test-close-before-command');
+    port.fd = 42;
+    port._close();
+    let opened = false;
+    t.mock.method(port, '_open', () => {
+      assert.equal(port.closing, false);
+      opened = true;
+    });
+    const command = port.command(async () => 'backup ready', { rawRepl: false });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(opened, false);
+    finishClose(null);
+    assert.equal(await command, 'backup ready');
+    assert.equal(opened, true);
+    viewer._test.clearDevices();
+  });
+
+  test('recovers the command queue after a serial close timeout', async t => {
+    const port = viewer.getPort('/dev/test-close-timeout');
+    port.closing = true;
+    const waitForClose = port._waitForClose.bind(port);
+    t.mock.method(port, '_waitForClose', () => waitForClose(20));
+    t.mock.method(port, '_open', () => {});
+    let ran = false;
+    await assert.rejects(port.command(async () => { ran = true; }, { rawRepl: false }), /still closing/);
+    assert.equal(ran, false);
+    assert.equal(port.busy, false);
+    assert.equal(port.inCommand, false);
+    port.closing = false;
+    t.mock.method(port, '_enterRaw', async () => {});
+    t.mock.method(port, '_resume', async () => {});
+    assert.equal(await port.command(async () => 'recovered'), 'recovered');
+    await port.releaseNow();
+    viewer._test.clearDevices();
+  });
+
+  test('keeps a halted board open until release resumes its program', async t => {
+    const port = viewer.getPort('/dev/test-console-release');
+    const monitor = () => {};
+    port.fd = 42;
+    port.halted = true;
+    port.monitors.add(monitor);
+    const events = [];
+    t.mock.method(port, '_resume', async () => { events.push('resume'); });
+    t.mock.method(port, '_close', () => { events.push('close'); port.fd = null; });
+    port.removeMonitor(monitor);
+    assert.equal(port.fd, 42);
+    await port.releaseNow();
+    assert.deepEqual(events, ['resume', 'close']);
+    viewer._test.clearDevices();
+  });
+
+  test('ignores old serial reads after reopening even when the fd is reused', async t => {
+    let completeRead;
+    t.mock.method(fs, 'read', (_fd, buffer, _offset, _length, _position, callback) => {
+      completeRead = error => { buffer.write('stale'); callback(error, error ? 0 : 5); };
+    });
+    t.mock.method(fs, 'close', (_fd, callback) => callback(null));
+    for (const error of [new Error('device disconnected'), null]) {
+      const port = viewer.getPort('/dev/test-reopened');
+      const info = { firmware: 'micropython' };
+      const received = [];
+      port.fd = 42;
+      port.info = info;
+      port._onData = chunk => received.push(chunk);
+      const pump = port._pump();
+      const oldRead = completeRead;
+      port._close();
+      port.fd = 42;
+      port.connectionGeneration++;
+      oldRead(error);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(port.fd, 42);
+      assert.equal(port.info, info);
+      assert.deepEqual(received, []);
+      port._close();
+      completeRead(null);
+      await pump;
+    }
+    viewer._test.clearDevices();
+  });
+
+  test('does not leave a raw REPL timeout pending when its write fails', async () => {
+    const port = viewer.getPort('/dev/test-repl-write-failure');
+    port.write = async data => {
+      if (data === '\x01') throw new Error('Board disconnected during write');
+    };
+    try {
+      await assert.rejects(port._enterRaw(0), /disconnected during write/);
+      assert.equal(port.capture, null);
+      // An orphaned read would reject after 400 ms and fail the test process.
+      await new Promise(resolve => setTimeout(resolve, 450));
+    } finally { viewer._test.clearDevices(); }
+  });
+
+  test('preserves a raw REPL reply received before the write completes', async () => {
+    const port = viewer.getPort('/dev/test-repl-fast-reply');
+    port.inCommand = true;
+    port.write = async data => {
+      if (data === '\x01') port._onData('raw REPL; CTRL-B to exit\r\n>');
+    };
+    try {
+      await port._enterRaw(0);
+      assert.equal(port.capture, null);
+    } finally { viewer._test.clearDevices(); }
   });
 
   test('round-trips stored ZIP backups', () => {
@@ -687,6 +1362,7 @@ describe('MCP protocol', () => {
       capabilities: { read: false, write: false, run: false, console: false },
     };
     const calls = [];
+    viewer._test.setDevices([]);
     viewer._test.setBootselDevices([device]);
     viewer._test.setBootselInstaller(async (dev, firmware) => {
       calls.push([dev, firmware]);
@@ -701,7 +1377,8 @@ describe('MCP protocol', () => {
         jsonrpc: '2.0', id: 8, method: 'tools/call',
         params: { name: 'pico_boards_list', arguments: {}, _meta: modernMeta },
       });
-      const bootsel = boards.result.structuredContent.boards.find(board => board.board_id === 'BOOTSEL-ID');
+      assert.deepEqual(boards.result.structuredContent.boards.map(board => board.board_id), ['BOOTSEL-ID']);
+      const bootsel = boards.result.structuredContent.boards[0];
       assert.deepEqual(bootsel.installable_firmware, ['micropython']);
       assert.equal(bootsel.boot_mode, true);
 
@@ -740,6 +1417,51 @@ describe('MCP protocol', () => {
       viewer._test.clearDevices();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test('checks and installs MicroPython on a confirmed ESP DOWNLOAD board', async () => {
+    const firmware = viewer.espFirmwareForChip('ESP32-S3');
+    const device = {
+      dev: '/dev/test-esp-install', uid: 'ESP-INSTALL-ID', ok: true, bootMode: true,
+      bootloader: 'esp-rom', firmware: 'esp-bootloader', firmwareLabel: 'Download mode',
+      machine: 'ESP32-S3', label: 'ESP32-S3', serial: '', readOnly: true,
+      bootDetails: {
+        securityChecked: true, installSupported: true,
+        secureDownload: false, secureBoot: false, flashEncryption: false,
+      },
+      installFirmware: { id: firmware.id, name: firmware.name, build: firmware.build,
+        page: firmware.page, address: firmware.offset },
+      capabilities: { read: false, write: false, run: false, console: false },
+    };
+    viewer._test.setDevices([{ dev: device.dev, port: fakePort(device) }]);
+    const calls = [];
+    viewer._test.setEspInstaller(async (dev, _download, _progress, options) => {
+      calls.push({ dev, options });
+      return { ok: true, bytes: 4567 };
+    });
+    const call = (id, args) => viewer.dispatchMcp({
+      jsonrpc: '2.0', id, method: 'tools/call',
+      params: { name: 'pico_install', arguments: args, _meta: modernMeta },
+    });
+    try {
+      const check = await call(14, {
+        board_id: device.uid, action: 'check', firmware: 'micropython',
+      });
+      assert.equal(check.result.structuredContent.status, 'ready');
+      assert.equal(check.result.structuredContent.build, 'ESP32_GENERIC_S3');
+      const unconfirmed = await call(15, {
+        board_id: device.uid, action: 'install', firmware: 'micropython',
+      });
+      assert.equal(unconfirmed.result.isError, true);
+      assert.match(unconfirmed.result.content[0].text, /confirmed must be true/);
+      const installed = await call(16, {
+        board_id: device.uid, action: 'install', firmware: 'micropython', confirmed: true,
+      });
+      assert.equal(installed.result.structuredContent.status, 'installed');
+      assert.equal(installed.result.structuredContent.model, 'MicroPython for ESP32-S3');
+      assert.equal(installed.result.structuredContent.storage_initialized, true);
+      assert.deepEqual(calls, [{ dev: device.dev, options: { initializeStorage: true } }]);
+    } finally { viewer._test.clearDevices(); }
   });
 
   test('supports the legacy initialize handshake', async () => {
@@ -803,6 +1525,10 @@ describe('mocked HTTP API', () => {
   let baseUrl;
   let microPort;
   let circuitPort;
+  let finishBootselInstall;
+  let finishEspInstall;
+  let espInstallOptions;
+  const initializedStorage = [];
 
   before(async () => {
     const micro = firmwareInfo('micropython', false);
@@ -815,8 +1541,23 @@ describe('mocked HTTP API', () => {
     ]);
     server = viewer.createServer({
       logDevices: false,
+      logErrors: false,
       mcpHttp: true,
-      installBootsel: async (dev, firmware) => ({ ok: true, dev, firmware }),
+      installBootsel: async (dev, firmware, _download, progress) => {
+        progress({ stage: 'validating', percent: 0 });
+        await new Promise(resolve => { finishBootselInstall = resolve; });
+        return { ok: true, dev, firmware: 'MicroPython for Pico W', firmwareId: firmware };
+      },
+      installEsp: async (dev, _download, progress, options) => {
+        espInstallOptions = options;
+        progress({ stage: 'writing', percent: 42 });
+        await new Promise(resolve => { finishEspInstall = resolve; });
+        return { ok: true, dev, firmware: 'MicroPython for ESP32' };
+      },
+      initializeStorage: async dev => {
+        initializedStorage.push(dev);
+        return { ok: true, initialized: true, fsTotal: 2097152, fsFree: 2088960 };
+      },
     });
     await new Promise((resolve, reject) => {
       server.once('error', reject);
@@ -840,25 +1581,122 @@ describe('mocked HTTP API', () => {
     const { response, body } = await api('/api/devices');
     assert.equal(response.status, 200);
     assert.match(body.serverInstance, /^\d+-\d+$/);
+    assert.ok(body.devices.every(device => device.bootloaderMode === null), 'unknown boards have no bootloader action');
     assert.deepEqual(body.devices.map(device => [device.firmware, device.readOnly]).sort(), [
       ['circuitpython', true],
       ['micropython', false],
     ]);
   });
 
+  test('offers ESP32 storage recovery for create, upload, folder, and ZIP restore flows', async () => {
+    const response = await fetch(baseUrl + '/');
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    const recoveredRoutes = [...html.matchAll(
+      /withEspStorageRecovery\(function \(\) \{\s*return api\('([^']+)/g,
+    )].map(match => match[1]);
+    assert.ok(recoveredRoutes.some(route => route.startsWith('/api/touch?')));
+    assert.ok(recoveredRoutes.some(route => route.startsWith('/api/file?')));
+    assert.ok(recoveredRoutes.some(route => route.startsWith('/api/mkdir?')));
+    assert.ok(recoveredRoutes.includes('/api/restore'));
+  });
+
+  test('requires confirmation before initializing ESP32 storage', async () => {
+    const dev = encodeURIComponent('/dev/test-micropython');
+    const denied = await api('/api/storage/initialize?dev=' + dev, { method: 'POST' });
+    assert.equal(denied.response.status, 400);
+    assert.match(denied.body.error, /confirmed/);
+    const initialized = await api('/api/storage/initialize?confirmed=1&dev=' + dev, { method: 'POST' });
+    assert.equal(initialized.response.status, 200);
+    assert.equal(initialized.body.fsTotal, 2097152);
+    assert.deepEqual(initializedStorage, ['/dev/test-micropython']);
+  });
+
   test('installs an explicitly selected BOOTSEL firmware', async () => {
-    const { response, body } = await api('/api/bootsel/install?dev=bootsel%3A%2Fdev%2Fsda1&firmware=pico-w', {
+    const started = await api('/api/bootsel/install?dev=bootsel%3A%2Fdev%2Fsda1&firmware=pico-w', {
       method: 'POST',
     });
-    assert.equal(response.status, 200);
-    assert.deepEqual(body, { ok: true, dev: 'bootsel:/dev/sda1', firmware: 'pico-w' });
+    assert.equal(started.response.status, 202);
+    assert.equal(started.body.status, 'running');
+    await new Promise(resolve => setImmediate(resolve));
+    const active = await api('/api/bootsel/install/status?id=' + started.body.id);
+    assert.equal(active.body.stage, 'validating');
+    finishBootselInstall();
+    let completed;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      completed = await api('/api/bootsel/install/status?id=' + started.body.id);
+      if (completed.body.status === 'complete') break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(completed.body.status, 'complete');
+    assert.deepEqual(completed.body.result, {
+      ok: true, dev: 'bootsel:/dev/sda1', firmware: 'MicroPython for Pico W', firmwareId: 'pico-w',
+    });
+  });
+
+  test('requires confirmation and installs ESP32 firmware on the selected serial port', async () => {
+    const dev = encodeURIComponent('/dev/test-micropython');
+    const denied = await api('/api/esp/install?dev=' + dev, { method: 'POST' });
+    assert.equal(denied.response.status, 400);
+    assert.match(denied.body.error, /confirmed/);
+    const started = await api('/api/esp/install?confirmed=1&initialize=1&dev=' + dev, { method: 'POST' });
+    assert.equal(started.response.status, 202);
+    assert.equal(started.body.status, 'running');
+    assert.equal(started.body.initializeStorage, true);
+    await new Promise(resolve => setImmediate(resolve));
+    const devices = await api('/api/devices');
+    const installing = devices.body.devices.find(device => device.dev === '/dev/test-micropython');
+    assert.equal(installing.installJob.stage, 'writing');
+    assert.equal(installing.installJob.percent, 42);
+    assert.equal(installing.installJob.initializeStorage, true);
+    assert.deepEqual(espInstallOptions, { initializeStorage: true });
+    finishEspInstall();
+    let completed;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      completed = await api('/api/esp/install/status?id=' + started.body.id);
+      if (completed.body.status === 'complete') break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(completed.response.status, 200);
+    assert.equal(completed.body.status, 'complete');
+    assert.deepEqual(completed.body.result, {
+      ok: true, dev: '/dev/test-micropython', firmware: 'MicroPython for ESP32',
+    });
+  });
+
+  test('logs background installation failures once while HTTP MCP remains quiet', async () => {
+    const lines = [];
+    const local = viewer.createServer({
+      logDevices: false, mcpHttp: true, errorLogger: line => lines.push(line),
+      installEsp: async (_dev, _download, progress) => {
+        progress({ stage: 'writing', percent: 12 });
+        throw new Error('ESP ROM rejected command 0x03 (error 0x05)');
+      },
+    });
+    await new Promise(resolve => local.listen(0, '127.0.0.1', resolve));
+    const url = 'http://127.0.0.1:' + local.address().port;
+    try {
+      const response = await fetch(url + '/api/esp/install?confirmed=1&dev=/dev/test-micropython', { method: 'POST' });
+      const job = await response.json();
+      assert.equal(response.status, 202);
+      for (let i = 0; i < 2; i++) {
+        const status = await (await fetch(url + '/api/esp/install/status?id=' + job.id)).json();
+        assert.equal(status.status, 'failed');
+      }
+      assert.equal(lines.length, 1);
+      assert.match(lines[0], /ESP32 installation \(writing\) failed: .*\/dev\/test-micropython.*command 0x03/);
+      await fetch(url + '/mcp', { method: 'POST', body: '{' });
+      assert.equal(lines.length, 1, 'MCP failures do not add terminal logs');
+    } finally {
+      await new Promise(resolve => local.close(resolve));
+    }
   });
 
   test('serves the packaged README for the full-screen help view', async () => {
     const response = await fetch(baseUrl + '/api/readme');
     assert.equal(response.status, 200);
     assert.match(response.headers.get('content-type'), /text\/markdown/);
-    assert.match(await response.text(), /^# pico-bay/m);
+    assert.match(await response.text(), /^# Pico Bay/m);
   });
 
   test('serves the License linked from the README', async () => {
@@ -898,6 +1736,17 @@ describe('mocked HTTP API', () => {
     assert.equal((await response.arrayBuffer()).byteLength > 0, true);
   });
 
+  test('fails a backup when a file cannot be read instead of writing an empty entry', async t => {
+    const originalExec = circuitPort.exec;
+    t.mock.method(circuitPort, 'exec', async function (code) {
+      if (code.includes("print('PVD'")) throw new Error('USB read failed');
+      return originalExec.call(this, code);
+    });
+    const { response, body } = await api('/api/zip?dev=' + encodeURIComponent('/dev/test-circuitpython'));
+    assert.equal(response.status, 500);
+    assert.match(body.error, /USB read failed/);
+  });
+
   test('rejects CircuitPython writes but allows file execution', async () => {
     const dev = encodeURIComponent('/dev/test-circuitpython');
     const write = await api('/api/file?path=new.py&dev=' + dev, { method: 'PUT', body: 'x' });
@@ -909,7 +1758,44 @@ describe('mocked HTTP API', () => {
     assert.equal(run.body.ok, true);
   });
 
+  test('enters BOOTSEL on read-only CircuitPython Pico and Pico 2 boards', async () => {
+    const saved = circuitPort.info;
+    try {
+      for (const machine of ['Raspberry Pi Pico with rp2040', 'Raspberry Pi Pico W with rp2040',
+        'Raspberry Pi Pico 2 with rp2350', 'Raspberry Pi Pico 2 W with rp2350']) {
+        circuitPort.info = { ...saved, machine };
+        const result = await api('/api/bootloader?dev=' + encodeURIComponent(saved.dev), { method: 'POST' });
+        assert.equal(result.response.status, 200);
+        assert.equal(result.body.ok, true);
+        assert.equal(circuitPort.calls.at(-1),
+          'import microcontroller\nmicrocontroller.on_next_reset(microcontroller.RunMode.BOOTLOADER)\nmicrocontroller.reset()');
+      }
+    } finally {
+      circuitPort.info = saved;
+    }
+  });
+
+  test('rejects unsupported bootloader targets and failures before the reset command', async () => {
+    const saved = microPort.info;
+    const command = microPort.command;
+    try {
+      const url = '/api/bootloader?dev=' + encodeURIComponent(saved.dev);
+      const unsupported = await api(url, { method: 'POST' });
+      assert.equal(unsupported.response.status, 500);
+      assert.match(unsupported.body.error, /unavailable/);
+      microPort.info = { ...saved, machine: 'Raspberry Pi Pico with RP2040' };
+      microPort.command = async () => { throw new Error('timed out waiting for the board'); };
+      const failed = await api(url, { method: 'POST' });
+      assert.equal(failed.response.status, 500);
+      assert.match(failed.body.error, /timed out/);
+    } finally {
+      microPort.info = saved;
+      microPort.command = command;
+    }
+  });
+
   test('keeps MicroPython write, folder, delete, and run routes available', async () => {
+    microPort.info.machine = 'Raspberry Pi Pico with RP2040';
     const dev = encodeURIComponent('/dev/test-micropython');
     const write = await api('/api/file?path=new.py&dev=' + dev, { method: 'PUT', body: 'print(3)' });
     assert.equal(write.response.status, 200);
@@ -923,6 +1809,11 @@ describe('mocked HTTP API', () => {
     const run = await api('/api/run?path=code.py&dev=' + dev, { method: 'POST' });
     assert.equal(run.response.status, 200);
     assert.ok(microPort.calls.length > 0);
+
+    const bootloader = await api('/api/bootloader?dev=' + dev, { method: 'POST' });
+    assert.equal(bootloader.response.status, 200);
+    assert.equal(bootloader.body.ok, true);
+    assert.ok(microPort.calls.includes('import machine\nmachine.bootloader()'));
   });
 
   test('serves modern MCP over the shared HTTP server', async () => {
@@ -995,6 +1886,111 @@ describe('mocked HTTP API', () => {
   });
 });
 
+describe('console serial lifecycle', () => {
+  async function setup(t) {
+    const port = viewer.getPort('/dev/test-console');
+    viewer._test.setDevices([{ dev: port.dev, port }]);
+    t.mock.method(port, '_open', () => {
+      assert.equal(port.closing, false);
+      port.fd = 42;
+    });
+    t.mock.method(port, '_close', () => { port.fd = null; });
+    const server = viewer.createServer({ logDevices: false, logErrors: false });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+      viewer._test.clearDevices();
+    });
+    return { port, server, url: 'http://127.0.0.1:' + server.address().port + '/api/console?dev=' + encodeURIComponent(port.dev) };
+  }
+
+  test('waits for serial close before attaching and cleans up when the client leaves', async t => {
+    const { port, url } = await setup(t);
+    port.closing = true;
+    let waiting;
+    const entered = new Promise(resolve => { waiting = resolve; });
+    const originalWait = port._waitForClose.bind(port);
+    t.mock.method(port, '_waitForClose', async () => { waiting(); await originalWait(); });
+    const controller = new AbortController();
+    const responsePromise = fetch(url, { signal: controller.signal });
+    await entered;
+    assert.equal(port.monitors.size, 0);
+    port.closing = false;
+    const response = await responsePromise;
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    assert.equal(port.monitors.size, 1);
+    let closed;
+    const closeComplete = new Promise(resolve => { closed = resolve; });
+    t.mock.method(port, '_close', () => { port.fd = null; closed(); });
+    controller.abort();
+    await closeComplete;
+    assert.equal(port.monitors.size, 0);
+  });
+
+  test('removes a pending attachment if the client disconnects while waiting', async t => {
+    const { port, server, url } = await setup(t);
+    let startWaiting, finishWaiting, cleanedUp;
+    const waiting = new Promise(resolve => { startWaiting = resolve; });
+    const released = new Promise(resolve => { finishWaiting = resolve; });
+    const cleaned = new Promise(resolve => { cleanedUp = resolve; });
+    const disconnected = new Promise(resolve => {
+      server.on('request', (_req, res) => res.once('close', resolve));
+    });
+    t.mock.method(port, '_waitForClose', async () => { startWaiting(); await released; });
+    const originalRemove = port.removeMonitor.bind(port);
+    t.mock.method(port, 'removeMonitor', monitor => { originalRemove(monitor); cleanedUp(); });
+    const controller = new AbortController();
+    const request = fetch(url, { signal: controller.signal });
+    const rejected = assert.rejects(request, { name: 'AbortError' });
+    await waiting;
+    controller.abort();
+    await rejected;
+    await disconnected;
+    finishWaiting();
+    await cleaned;
+    assert.equal(port.monitors.size, 0);
+    assert.equal(port.fd, null);
+  });
+
+  test('keeps the port open for another console subscriber and an active command', async t => {
+    const { port } = await setup(t);
+    const first = () => {}, second = () => {};
+    await port.addMonitor(first);
+    await port.addMonitor(second);
+    port.removeMonitor(first);
+    assert.equal(port.fd, 42);
+    port.busy = true;
+    port.removeMonitor(second);
+    assert.equal(port.fd, 42);
+    port.busy = false;
+    await port.releaseNow();
+    assert.equal(port.fd, null);
+  });
+
+  test('returns JSON errors without leaking a monitor when opening fails', async t => {
+    const { port, url } = await setup(t);
+    t.mock.method(port, '_open', () => { throw new Error('Board disconnected'); });
+    const response = await fetch(url);
+    assert.equal(response.status, 500);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    assert.match((await response.json()).error, /Board disconnected/);
+    assert.equal(port.monitors.size, 0);
+  });
+
+  test('reports a stalled serial close without opening an event stream', async t => {
+    const { port, url } = await setup(t);
+    port.closing = true;
+    const originalWait = port._waitForClose.bind(port);
+    t.mock.method(port, '_waitForClose', () => originalWait(20));
+    const response = await fetch(url);
+    assert.equal(response.status, 500);
+    assert.match((await response.json()).error, /still closing/);
+    assert.equal(port.monitors.size, 0);
+  });
+});
+
 describe('MCP stdio process', () => {
   test('writes only JSON-RPC messages to stdout', async () => {
     const child = spawn(process.execPath, ['pico-bay.js', '--mcp-stdio'], {
@@ -1027,18 +2023,35 @@ describe('MCP stdio process', () => {
 describe('optional physical boards', () => {
   test('runs firmware-appropriate checks when boards are connected', async t => {
     viewer._test.clearDevices();
-    const devices = (await viewer.scanDevices()).filter(device => !device.bootMode);
+    const devices = await viewer.scanDevices();
     if (!devices.length) {
       t.skip('no serial boards connected');
       return;
     }
 
-    const ports = devices.map(device => viewer.getPort(device.dev));
+    t.diagnostic('Scan found ' + devices.length + ' device(s): ' + devices.map(device => device.dev).join(', '));
+    // Include bootloader boards in the report; only serial devices own ports.
+    const ports = devices.filter(device => !device.bootMode || device.bootloader === 'esp-rom')
+      .map(device => viewer.getPort(device.dev));
     for (const port of ports) port._cancelIdle();
     try {
       for (const device of devices) {
-        await t.test(device.firmwareLabel + ' on ' + device.dev, async () => {
-          assert.equal(device.ok, true, device.error || 'device probe failed');
+        const details = device.ok
+          ? [device.firmwareLabel, device.label || device.machine,
+            device.release && 'v' + String(device.release).replace(/^v/, ''),
+            (device.uid || device.serial) && 'ID ' + (device.uid || device.serial)]
+            .filter(Boolean).join(' · ')
+          : 'Unidentified device';
+        await t.test(details + ' on ' + device.dev, async t => {
+          if (device.bootMode) {
+            t.skip((device.bootloader === 'esp-rom' ? 'ROM download' : 'BOOTSEL') +
+              ' mode — filesystem checks require running firmware');
+            return;
+          }
+          if (!device.ok) {
+            t.skip(device.error || 'device probe failed');
+            return;
+          }
           if (device.firmware === 'micropython') {
             await testPhysicalMicroPython(device);
           } else if (device.firmware === 'circuitpython') {

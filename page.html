@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>pico-bay</title>
+<title>Pico Bay</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -130,6 +130,7 @@
   #menu button:hover, #menu a:hover, .dropdown-menu button:hover { background: #f3f4f6; }
   #menu button:disabled { color: #8c959f; cursor: not-allowed; }
   #menu button:disabled:hover { background: none; }
+  #menu button[hidden] { display: none; }
   #menu button.danger, .dropdown-menu button.danger { color: #cf222e; }
   #menu button.danger:hover, .dropdown-menu button.danger:hover { background: #ffebe9; }
   #menu button.menu-toggle { display: flex; align-items: center; justify-content: space-between; }
@@ -200,6 +201,7 @@
   #main.welcome-mode .welcome-content { display: block; }
   #placeholder .welcome-content p { margin: 24px 0; font-size: 15px; font-weight: 400; }
   .welcome-content strong { color: #24292f; }
+  .welcome-content .welcome-heading { color: #1f883d; }
   .welcome-content .btn { margin: 0 5px; }
 
   #search-wrap { padding: 10px; border-bottom: 1px solid #d0d7de; display: flex; gap: 6px; }
@@ -239,7 +241,6 @@
   .file .twist { flex: 0 0 11px; color: #8c959f; font-size: 8px; line-height: 18px; }
   .file .fdir { font-size: 11px; color: #8c959f; }
 
-  /* Reveal row actions on hover. */
   .file .acts { position: absolute; top: 5px; right: 8px; display: none; gap: 2px; }
   .file:hover .acts { display: flex; }
   .file .acts button {
@@ -282,7 +283,8 @@
   }
   #placeholder p { font-size: 18px; font-weight: 600; color: #57606a; }
   #placeholder small { font-size: 13px; }
-  #bootsel-options { display: none; gap: 12px; margin: 28px 0; }
+  #bootsel-options { display: none; flex-direction: column; align-items: center; gap: 12px; margin: 12px 0 14px; }
+  #bootsel-options .board-choices { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
   #bootsel-options.visible { display: flex; }
   #bootsel-options button { min-width: 180px; justify-content: center; padding: 8px 14px; }
   #bootsel-options .standard-choice { color: #fff; background: #2da44e; border-color: #2da44e; }
@@ -291,17 +293,36 @@
   #bootsel-options .wifi-choice:hover:not(:disabled) { background: #1f7ae0; border-color: #1f7ae0; }
   #bootsel-options svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
   #bootsel-options.mount-help { flex-direction: column; align-items: center; }
+  #bootsel-options.esp-install { flex-direction: column; align-items: center; max-width: 720px; }
+  #bootsel-options.esp-install .boot-details { margin-bottom: 4px; }
+  #bootsel-options .install-note { max-width: 620px; color: #57606a; line-height: 1.5; text-align: center; }
+  #bootsel-options .install-unavailable { max-width: 620px; color: #cf222e; line-height: 1.5; text-align: center; }
+  #bootsel-options .install-option { display: grid; grid-template-columns: auto 1fr; gap: 2px 9px; max-width: 520px; margin-bottom: 8px; text-align: left; }
+  #bootsel-options .install-option input { grid-row: 1 / 3; margin-top: 7px; }
+  #bootsel-options .install-option > span { color: #24292f; font-weight: 400; }
+  #bootsel-options .install-option small { color: #57606a; line-height: 1.4; }
   .mount-command { display: flex; align-items: center; gap: 8px; }
   .mount-command code { padding: 9px 12px; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }
+  #dialog-message .mount-command { margin: 10px 0 18px; white-space: normal; }
+  #dialog-message .mount-command code { min-width: 0; overflow-wrap: anywhere; }
+  #dialog-message .mount-command button { flex-shrink: 0; min-width: auto; }
+  #dialog-message .mount-command svg { width: 16px; height: 16px; }
   #bootsel-options .mount-command button { min-width: auto; }
   #bootsel-options .mount-command button svg { width: 16px; height: 16px; }
   #bootsel-options.mount-help > [data-retry-firmware] { margin-top: 12px; }
   #bootsel-source { display: none; }
   #bootsel-source.visible { display: block; }
   #bootsel-source a { color: #0969da; }
-  .boot-details { display: grid; grid-template-columns: auto 1fr; gap: 10px 24px; text-align: left; max-width: 620px; margin: 0; }
+  .boot-details {
+    display: grid; grid-template-columns: auto 1fr; gap: 2px 18px;
+    max-width: 620px; margin: 0; text-align: left;
+    font-size: 12.5px; line-height: 1.35;
+  }
   .boot-details dt { color: #57606a; }
   .boot-details dd { margin: 0; overflow-wrap: anywhere; }
+  .install-warning { display: block; color: #cf222e; font-weight: 700; }
+  #bootsel-options > .boot-details { margin-bottom: 16px; }
+  [data-copy-command].copied { color: #1a7f37; border-color: #1a7f37; }
   .recovery-steps { display: grid; gap: 12px; max-width: 680px; padding: 0 24px; text-align: center; color: #24292f; line-height: 1.5; }
 
   /* Keep wrapped text beside its source line number. */
@@ -323,7 +344,6 @@
   .line-src { min-width: 0; padding: 0 16px; white-space: pre; tab-size: 4; }
   .code-row:first-child .line-no, .code-row:first-child .line-src { padding-top: 16px; }
   .code-row:last-child .line-no, .code-row:last-child .line-src { padding-bottom: 60px; }
-  /* Wrap long lines on wider screens. */
   @media (min-width: 700px) {
     .line-src { white-space: pre-wrap; overflow-wrap: anywhere; }
   }
@@ -439,9 +459,9 @@
 <div id="busy"></div>
 
 <div id="topbar">
-  <a class="brand" href="/" onclick="showWelcome(true); return false;" title="Welcome message">pico-bay</a>
+  <a class="brand" href="/" onclick="showWelcome(true); return false;" title="Welcome message">Pico Bay</a>
   <span id="pills"></span>
-  <button class="btn icon" id="refresh-btn" onclick="refreshDevices(this)" title="Scan USB for connected boards">
+  <button class="btn icon" id="refresh-btn" onclick="refreshDevices()" title="Scan USB for connected boards">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
   </button>
   <span id="spacer"></span>
@@ -481,6 +501,8 @@
       <button class="requires-device" onclick="doReset(true)">Hard reset (reconnect)</button>
       <hr>
       <button class="danger requires-write" onclick="doClean()">Delete all files…</button>
+      <button class="danger requires-device" id="bootloader-btn" onclick="doBootloader()" hidden>Enter BOOTSEL mode</button>
+      <button class="danger" id="reset-pi-usb-btn" onclick="showPiUsbPowerHelp()" hidden>Toggle Pi USB Power</button>
       <hr>
       <button onclick="showReadme()">README.md</button>
       <a href="https://www.raspberrypi.com/documentation/microcontrollers/micropython.html"
@@ -555,10 +577,10 @@
         <p id="ph-title">Select a board</p>
         <small id="ph-sub">Connect a Raspberry Pi Pico or ESP32 board over USB and select it above</small>
         <div class="welcome-content">
-          <p><strong>Your next project starts here.</strong><br>Browse and edit files, run Python, follow the live console, and back up your boards - all from one place.</p>
-          <p><strong>Connect a Raspberry Pi Pico or ESP32 board with MicroPython or CircuitPython using a USB data cable.</strong><br>It will appear in the top bar automatically. You can also scan for boards at any time.</p>
-          <button class="btn primary" onclick="refreshDevices(document.getElementById('refresh-btn'))">Scan for boards</button>
-          <button class="btn" onclick="showReadme()">Getting started</button>
+          <p><strong class="welcome-heading">Your next project starts here.</strong></p>
+          <p>Connect a Raspberry Pi Pico or ESP32 board using a USB data cable.<br>
+          It will appear in the top bar automatically.</p>
+          <button class="btn primary" onclick="showReadme()">Getting started</button>
         </div>
         <div id="bootsel-options"></div>
         <small id="bootsel-source">Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a></small>
@@ -605,7 +627,7 @@
 <dialog id="app-dialog">
   <form id="dialog-form">
     <h2 id="dialog-title"></h2>
-    <p id="dialog-message"></p>
+    <div id="dialog-message"></div>
     <input id="dialog-input" autocomplete="off">
     <div id="dialog-actions">
       <span id="dialog-footer"></span>
@@ -673,8 +695,11 @@
   var evtSource = null;
   var inflight = 0;
   var devicesLoading = false;
+  var manualScanPending = false;
   var initialScanComplete = false;
   var welcomeSelected = false;
+  var activeBootselJobId = null;
+  var activeEspJobId = null;
   var serverConnected = null;
   var serverInstance = null;
   var hostWarning = null;
@@ -686,6 +711,7 @@
   var mcpEnabled = false;
   var dialogResolve = null;
   var dialogHasInput = false;
+  var bootloaderPending = false;
   var consoleControlBuffer = '';
   var hideSystemFiles = true;
 
@@ -813,6 +839,10 @@
 
   dialogForm.addEventListener('submit', function (e) { e.preventDefault(); finishDialog(true); });
   dialogCancel.addEventListener('click', function () { finishDialog(false); });
+  dialogMessage.addEventListener('click', function (e) {
+    var button = e.target.closest('[data-copy-command]');
+    if (button) copyText(button.dataset.copyCommand, button);
+  });
   appDialog.addEventListener('cancel', function (e) { e.preventDefault(); finishDialog(false); });
 
   function updateStatusBanner() {
@@ -909,7 +939,6 @@
     return d.toISOString().slice(0, 10);
   }
 
-  // Apply shared progress and error handling.
   async function api(path, opts, deviceOverride) {
     opts = opts || {};
     var requestDev = deviceOverride === undefined ? curDev : deviceOverride;
@@ -994,8 +1023,17 @@
     }).join('');
   }
 
+  function setScanning(scanning) {
+    var refreshButton = document.getElementById('refresh-btn');
+    refreshButton.classList.toggle('refreshing', scanning);
+    refreshButton.disabled = scanning;
+  }
+
   async function loadDevices(manual) {
-    if (devicesLoading) return;
+    if (devicesLoading) {
+      if (manual) manualScanPending = true;
+      return;
+    }
     devicesLoading = true;
     try {
       var res = await serverFetch('/api/devices' + (manual ? '?manual=1' : ''));
@@ -1004,11 +1042,13 @@
       if (serverInstance && data.serverInstance !== serverInstance) { location.reload(); return; }
       serverInstance = data.serverInstance;
       usbAutomountSetupAvailable = !!data.usbAutomountSetupAvailable;
+      document.getElementById('reset-pi-usb-btn').hidden = !data.raspberryPiHost;
       setMcpEnabled(data.mcpEnabled);
       setHostWarning(data.hostWarning || null);
       var before = devices.map(function (d) { return d.dev; }).join(',');
       var previousDevice = currentDevice();
       devices = data.devices;
+      setScanning(devices.some(function (d) { return d.probing; }));
       var selectedDevice = currentDevice();
       setMountWarning(selectedDevice ? selectedDevice.mountCommand : null);
       setEnabled(!!curDev && !!currentDevice() && currentDevice().ok && !currentDevice().bootMode);
@@ -1023,7 +1063,7 @@
       }
       if (before !== now) renderPills();
       if (!initialScanComplete) {
-        if (devices.some(function (d) { return d.probing; })) {
+        if (devices.some(function (d) { return d.probing; }) && !devices.some(function (d) { return d.ok; })) {
           showWelcome();
           renderPills();
           return;
@@ -1041,27 +1081,30 @@
       else renderPills();
     } catch (e) {
       // Keep the last state until polling succeeds.
+      setScanning(false);
     } finally {
       devicesLoading = false;
+      if (manualScanPending) {
+        manualScanPending = false;
+        await loadDevices(true);
+      }
     }
   }
 
-  async function refreshDevices(button) {
-    if (!button || button.classList.contains('refreshing')) return;
+  async function refreshDevices() {
+    var button = document.getElementById('refresh-btn');
+    if (button.classList.contains('refreshing')) return;
     welcomeSelected = false;
     exitReadme();
-    button.classList.add('refreshing');
-    button.disabled = true;
+    setScanning(true);
     try {
       await Promise.all([
         loadDevices(true),
         new Promise(function (resolve) { setTimeout(resolve, 350); }),
       ]);
     } catch (e) {
+      setScanning(false);
       toast('Refresh failed: ' + e.message, true);
-    } finally {
-      button.classList.remove('refreshing');
-      button.disabled = false;
     }
   }
 
@@ -1083,8 +1126,8 @@
     setEnabled(false);
     resetView();
     mainEl.classList.add('bootsel-mode', 'welcome-mode');
-    phTitle.textContent = 'Welcome to pico-bay';
-    phSub.innerHTML = 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards<br>with MicroPython and CircuitPython, over USB.';
+    phTitle.textContent = 'Welcome to Pico Bay';
+    phSub.innerHTML = 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards<br>with MicroPython or CircuitPython over USB.';
   }
 
   function setEnabled(on) {
@@ -1097,6 +1140,15 @@
     document.querySelectorAll('.requires-write').forEach(function (el) {
       el.disabled = !on || !canWrite();
     });
+    var bootloaderButton = document.getElementById('bootloader-btn');
+    var device = currentDevice();
+    var canEnterBootloader = !!on && !!device && !!device.bootloaderMode;
+    bootloaderButton.hidden = !canEnterBootloader;
+    bootloaderButton.disabled = !canEnterBootloader || bootloaderPending;
+    if (canEnterBootloader) {
+      bootloaderButton.textContent = device.bootloaderMode === 'download'
+        ? 'Enter download mode…' : 'Enter BOOTSEL mode';
+    }
     conIn.disabled = !on || !canUseConsole();
     conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
   }
@@ -1128,7 +1180,6 @@
         bootselOptionsEl.classList.add('visible', 'mount-help');
         bootselOptionsEl.innerHTML = '<div class="recovery-steps">' +
           '<strong>To start normally: release BOOT, then press RESET / EN.</strong>' +
-          '<strong>To enter ESP32 download mode: hold BOOT, tap RESET / EN, then release BOOT.</strong>' +
           '</div><button class="btn" data-rescan>Rescan</button>';
       }
       return;
@@ -1142,7 +1193,7 @@
       storageEl.classList.remove('visible');
       if (selectedDevice.bootloader === 'esp-rom') {
         phTitle.textContent = selectedDevice.label + ' download mode';
-        phSub.textContent = 'Bootloader detected. Release BOOT, press RESET / EN, then Scan to return to MicroPython.';
+        phSub.textContent = 'Install the latest official MicroPython firmware, or reset the board to leave download mode.';
         var info = selectedDevice.bootDetails || {};
         var rows = [
           ['Chip', selectedDevice.machine],
@@ -1152,16 +1203,39 @@
           ['MAC address', info.mac],
           ['Chip ID', info.chipId],
           ['ROM identifier', info.magic],
-          ['Secure download', info.secureDownload === undefined ? null : info.secureDownload ? 'Enabled' : 'Disabled']
+          ['Secure download', info.secureDownload === undefined ? null : info.secureDownload ? 'Enabled' : 'Disabled'],
+          ['Secure boot', info.secureBoot === undefined ? null : info.secureBoot ? 'Enabled' : 'Disabled'],
+          ['Flash encryption', info.flashEncryption === undefined ? null : info.flashEncryption ? 'Enabled' : 'Disabled']
         ];
+        var firmware = selectedDevice.installFirmware;
+        var installJob = selectedDevice.installJob;
+        var installAction = firmware && info.installSupported
+          ? '<div class="install-note">' + esc(firmware.build) +
+            ' is the generic MicroPython build for this chip.</div>' +
+            '<label class="install-option"><input type="checkbox" data-esp-initialize' +
+            ((!installJob || installJob.initializeStorage) ? ' checked' : '') +
+            (installJob ? ' disabled' : '') + '><span>Erase and initialize storage</span>' +
+            '<small>Runs after firmware verification. Recommended for a first installation. Uncheck to keep existing files.</small></label>' +
+            '<button class="btn standard-choice" data-esp-install' +
+            (installJob ? ' disabled' : '') + '>' +
+            (installJob ? 'Starting…' : 'Install MicroPython') + '</button>'
+          : '<strong class="install-unavailable">' +
+            esc(firmware ? (info.securityChecked === false || info.securityChecked === undefined
+              ? 'Installation is unavailable because the board security state could not be verified.'
+              : 'Installation is unavailable because flash security is enabled on this board.') :
+              'Automatic installation is not available for this chip.') + '</strong>';
         bootselOptionsEl.innerHTML = '<dl class="boot-details">' + rows.filter(function (row) {
           return row[1] !== undefined && row[1] !== null && row[1] !== '';
         }).map(function (row) {
           return '<dt>' + esc(row[0]) + '</dt><dd>' + esc(String(row[1])) + '</dd>';
-        }).join('') + '</dl>';
-        bootselOptionsEl.classList.add('visible');
-        bootselSourceEl.textContent = 'Detection only. ESP32 firmware installation is not supported.';
+        }).join('') + '</dl>' + installAction;
+        bootselOptionsEl.classList.add('visible', 'esp-install');
+        bootselSourceEl.innerHTML = firmware
+          ? 'Firmware is downloaded from <a href="' + esc(firmware.page) +
+            '" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a>'
+          : 'This chip can be detected, but it has no matching MicroPython installer.';
         bootselSourceEl.classList.add('visible');
+        if (installJob) setTimeout(function () { monitorEspInstall(installJob.id); }, 0);
         return;
       }
       bootselSourceEl.innerHTML = 'Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a>';
@@ -1170,13 +1244,23 @@
       var choices = selectedDevice.machine === 'RP2040'
         ? [['pico', 'Raspberry Pi Pico', false], ['pico-w', 'Raspberry Pi Pico W', true]]
         : [['pico2', 'Raspberry Pi Pico 2', false], ['pico2-w', 'Raspberry Pi Pico 2 W', true]];
-      bootselOptionsEl.innerHTML = choices.map(function (choice) {
+      var bootselJob = selectedDevice.installJob;
+      bootselOptionsEl.innerHTML = renderBoardDetails([
+        ['Chip', selectedDevice.machine], ['Mode', 'BOOTSEL'],
+        ['Board model', 'Pico / Pico W cannot be distinguished in BOOTSEL'],
+        ['Board ID', selectedDevice.uid || 'Not reported'],
+        ['Block device', selectedDevice.blockDevice],
+        ['Mount status', selectedDevice.mountRoot ? 'Mounted' : 'Not mounted - will be requested during installation'],
+        ['Mount location', selectedDevice.mountRoot],
+      ]) + '<div class="board-choices">' + choices.map(function (choice) {
         var wifi = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10.5a10 10 0 0 1 14 0M8.5 14a5 5 0 0 1 7 0M12 18h.01"></path></svg>';
-        return '<button class="btn ' + (choice[2] ? 'wifi-choice' : 'standard-choice') + '" data-firmware="' + choice[0] + '">' +
+        return '<button class="btn ' + (choice[2] ? 'wifi-choice' : 'standard-choice') + '" data-firmware="' + choice[0] + '"' +
+          (bootselJob ? ' disabled' : '') + '>' +
           (choice[2] ? wifi : '') + esc(choice[1]) + '</button>';
-      }).join('');
+      }).join('') + '</div>';
       bootselOptionsEl.classList.add('visible');
       bootselSourceEl.classList.add('visible');
+      if (bootselJob) setTimeout(function () { monitorBootselInstall(bootselJob.id); }, 0);
       return;
     }
     setEnabled(true);
@@ -1194,22 +1278,66 @@
     if (b) selectDev(b.dataset.dev);
   });
 
+  function renderBoardDetails(rows) {
+    return '<dl class="boot-details">' + rows.filter(function (row) {
+      return row[1] !== null && row[1] !== undefined && row[1] !== '';
+    }).map(function (row) {
+      return '<dt>' + esc(row[0]) + '</dt><dd>' + esc(String(row[1])) + '</dd>';
+    }).join('') + '</dl>';
+  }
+
+  function setInstallMessage(message) {
+    phSub.innerHTML = esc(message).replace('Keep the board connected.',
+      '<strong class="install-warning">Keep the board connected.</strong>');
+  }
+
   async function copyText(text, button) {
     try {
-      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
-      else {
+      var copied = false;
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(text); copied = true; } catch (_) { /* Try the HTTP-compatible fallback. */ }
+      }
+      if (!copied) {
         var input = document.createElement('textarea');
         input.value = text;
         input.style.position = 'fixed';
         input.style.opacity = '0';
-        document.body.appendChild(input);
-        input.select();
-        document.execCommand('copy');
-        input.remove();
+        (button.closest('dialog') || document.body).appendChild(input);
+        try {
+          input.focus();
+          input.select();
+          copied = document.execCommand('copy');
+        } finally { input.remove(); button.focus(); }
       }
-      button.title = 'Copied';
-      setTimeout(function () { button.title = 'Copy'; }, 1400);
+      if (!copied) throw new Error('Clipboard unavailable');
+      if (!button.classList.contains('copied')) button.dataset.copyIcon = button.innerHTML;
+      clearTimeout(button.copyFeedbackTimer);
+      button.textContent = 'Copied!';
+      button.classList.add('copied');
+      button.title = 'Copied!';
+      button.setAttribute('aria-label', 'Copied to clipboard');
+      toast('Copied to clipboard');
+      button.copyFeedbackTimer = setTimeout(function () {
+        button.innerHTML = button.dataset.copyIcon;
+        button.classList.remove('copied');
+        button.title = 'Copy';
+        button.setAttribute('aria-label', 'Copy');
+      }, 1800);
     } catch (error) { toast('Could not copy the command', true); }
+  }
+
+  function showPiUsbPowerHelp() {
+    closeMenu();
+    var reset = 'sudo uhubctl -l 1-1 -a 0 ; sleep 2 ; sudo uhubctl -l 1-1 -a 1';
+    var install = 'sudo apt update\nsudo apt install uhubctl';
+    var block = function (value) {
+      return '<div class="mount-command"><code>' + esc(value).replace(/\n/g, '<br>') + '</code>' +
+        '<button type="button" class="btn" data-copy-command="' + esc(value) + '" title="Copy" aria-label="Copy">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg></button></div>';
+    };
+    showDialog({ title: 'Toggle Pi USB Power', confirmLabel: 'Close', cancel: false, messageHTML:
+      'Run this on the Raspberry Pi to power-cycle the USB hub, then select Scan.' + block(reset) +
+      '<strong>If uhubctl is not installed, run:</strong>' + block(install) });
   }
 
   function showBootselMountHelp(error, firmwareId, firmwareName) {
@@ -1229,6 +1357,58 @@
     return true;
   }
 
+  function renderBootselInstallProgress(job) {
+    var labels = {
+      queued: 'Starting', downloading: 'Downloading', validating: 'Validating',
+      writing: 'Installing', rebooting: 'Rebooting'
+    };
+    var label = labels[job.stage] || 'Installing';
+    bootselOptionsEl.querySelectorAll('button').forEach(function (item) {
+      item.disabled = true;
+      if (item.dataset.firmware === job.firmwareId) item.textContent = label + '…';
+    });
+    phTitle.textContent = label + ' MicroPython…';
+    setInstallMessage(job.stage === 'rebooting'
+      ? 'Firmware copied. Waiting for the board to restart.'
+      : 'Keep the board connected.');
+  }
+
+  async function monitorBootselInstall(jobId) {
+    if (!jobId || activeBootselJobId === jobId) return;
+    activeBootselJobId = jobId;
+    try {
+      while (activeBootselJobId === jobId) {
+        var response = await serverFetch('/api/bootsel/install/status?id=' + encodeURIComponent(jobId));
+        var job = await response.json();
+        if (!response.ok || job.error) throw new Error(job.error || 'Could not read installation progress');
+        if (activeBootselJobId !== jobId) return;
+        if (job.status === 'failed') throw new Error(job.error || 'BOOTSEL installation failed');
+        if (job.status === 'complete') {
+          activeBootselJobId = null;
+          phTitle.textContent = 'MicroPython installed';
+          phSub.textContent = job.result.firmware + ' was installed. Waiting for the board to reconnect…';
+          setTimeout(function () { loadDevices(true); }, 1200);
+          return;
+        }
+        renderBootselInstallProgress(job);
+        await new Promise(function (resolve) { setTimeout(resolve, 150); });
+      }
+    } catch (error) {
+      if (activeBootselJobId === jobId) activeBootselJobId = null;
+      var current = currentDevice();
+      var firmwareName = job && job.firmwareName ? job.firmwareName : 'the selected board';
+      if (!current || !showBootselMountHelp(error, job && job.firmwareId, firmwareName)) {
+        phTitle.textContent = 'Installation failed';
+        phSub.textContent = error.message;
+        bootselOptionsEl.querySelectorAll('button').forEach(function (item) {
+          item.disabled = false;
+          if (job && item.dataset.firmware === job.firmwareId) item.textContent = 'Retry installation';
+        });
+        toast(error.message, true);
+      }
+    }
+  }
+
   async function installBootselChoice(firmwareId, firmwareName, confirmFirst) {
     var device = currentDevice();
     if (!device || !device.bootMode) return;
@@ -1241,15 +1421,14 @@
       if (!confirmed) return;
     }
     bootselOptionsEl.querySelectorAll('button').forEach(function (item) { item.disabled = true; });
-    phTitle.textContent = 'Downloading and installing MicroPython…';
-    phSub.textContent = 'Keep the board connected. It will reboot automatically.';
+    phTitle.textContent = 'Starting MicroPython installation…';
+    setInstallMessage('Keep the board connected.');
     try {
-      var result = await api('/api/bootsel/install?firmware=' + encodeURIComponent(firmwareId), {
+      var job = await api('/api/bootsel/install?firmware=' + encodeURIComponent(firmwareId), {
         method: 'POST'
       });
-      phTitle.textContent = 'MicroPython installed';
-      phSub.textContent = result.firmware + ' was installed. Waiting for the board to reboot and reconnect…';
-      setTimeout(function () { loadDevices(true); }, 1200);
+      renderBootselInstallProgress(job);
+      await monitorBootselInstall(job.id);
     } catch (error) {
       if (!showBootselMountHelp(error, firmwareId, firmwareName)) {
         phTitle.textContent = 'Installation failed';
@@ -1260,16 +1439,105 @@
     }
   }
 
+  function showEspInstallFailure(message) {
+    phTitle.textContent = 'Installation failed';
+    phSub.textContent = message;
+    var button = bootselOptionsEl.querySelector('[data-esp-install]');
+    if (button) { button.disabled = false; button.textContent = 'Retry installation'; }
+    var initializeOption = bootselOptionsEl.querySelector('[data-esp-initialize]');
+    if (initializeOption) initializeOption.disabled = false;
+    toast(message, true);
+  }
+
+  function renderEspInstallProgress(job) {
+    var labels = {
+      queued: 'Starting', downloading: 'Downloading', validating: 'Validating',
+      preparing: 'Preparing flash', initializing: 'Initializing storage', writing: 'Writing firmware',
+      verifying: 'Verifying', rebooting: 'Rebooting'
+    };
+    var label = labels[job.stage] || 'Installing';
+    var button = bootselOptionsEl.querySelector('[data-esp-install]');
+    if (button) {
+      button.disabled = true;
+      button.textContent = job.stage === 'writing' ? job.percent + '%' : label + '…';
+    }
+    var initializeOption = bootselOptionsEl.querySelector('[data-esp-initialize]');
+    if (initializeOption) initializeOption.disabled = true;
+    phTitle.textContent = label + ' MicroPython…';
+    setInstallMessage((job.stage === 'writing' ? 'Writing firmware — ' + job.percent + '%. ' : '') +
+      'Keep the board connected.');
+  }
+
+  async function monitorEspInstall(jobId) {
+    if (!jobId || activeEspJobId === jobId) return;
+    activeEspJobId = jobId;
+    try {
+      while (activeEspJobId === jobId) {
+        var response = await serverFetch('/api/esp/install/status?id=' + encodeURIComponent(jobId));
+        var job = await response.json();
+        if (!response.ok || job.error) throw new Error(job.error || 'Could not read installation progress');
+        if (activeEspJobId !== jobId) return;
+        if (job.status === 'failed') throw new Error(job.error || 'ESP32 installation failed');
+        if (job.status === 'complete') {
+          activeEspJobId = null;
+          phTitle.textContent = 'MicroPython installed';
+          phSub.textContent = job.result.rebooted === false
+            ? job.result.firmware + ' was verified and installed. Reset the board to start MicroPython.'
+            : job.result.firmware + ' was verified and installed. Waiting for the board to reconnect…';
+          setTimeout(function () { loadDevices(true); }, 1200);
+          setTimeout(function () { loadDevices(true); }, 3500);
+          return;
+        }
+        renderEspInstallProgress(job);
+        await new Promise(function (resolve) { setTimeout(resolve, 250); });
+      }
+    } catch (error) {
+      if (activeEspJobId === jobId) activeEspJobId = null;
+      showEspInstallFailure(error.message);
+    }
+  }
+
+  async function installEspDownload() {
+    var device = currentDevice();
+    if (!device || device.bootloader !== 'esp-rom' || !device.installFirmware) return;
+    var initializeOption = bootselOptionsEl.querySelector('[data-esp-initialize]');
+    var initializeStorage = !initializeOption || initializeOption.checked;
+    var confirmed = await confirmDialog(
+      'This will download ' + device.installFirmware.build + ', write it to ' + device.machine +
+      ' on ' + device.dev + ', and reboot the board.' +
+      (initializeStorage
+        ? ' After firmware verification, storage will be erased and initialized; existing files will be lost.'
+        : ' Existing filesystem storage will be preserved.'),
+      { title: 'Install MicroPython?', confirmLabel: 'Download and install', defaultCancel: true }
+    );
+    if (!confirmed) return;
+    var button = bootselOptionsEl.querySelector('[data-esp-install]');
+    if (button) { button.disabled = true; button.textContent = 'Installing…'; }
+    phTitle.textContent = 'Downloading and installing MicroPython…';
+    setInstallMessage('Validating, writing, and verifying the firmware. Keep the board connected.');
+    try {
+      var job = await api('/api/esp/install?confirmed=1&initialize=' + (initializeStorage ? '1' : '0'), {
+        method: 'POST'
+      });
+      renderEspInstallProgress(job);
+      await monitorEspInstall(job.id);
+    } catch (error) {
+      showEspInstallFailure(error.message);
+    }
+  }
+
   bootselOptionsEl.addEventListener('click', async function (e) {
     var rescanButton = e.target.closest('[data-rescan]');
     if (rescanButton) {
       rescanButton.disabled = true;
-      try { await refreshDevices(document.getElementById('refresh-btn')); }
+      try { await refreshDevices(); }
       finally { rescanButton.disabled = false; }
       return;
     }
     var copyButton = e.target.closest('[data-copy-command]');
     if (copyButton) { await copyText(copyButton.dataset.copyCommand, copyButton); return; }
+    var espInstallButton = e.target.closest('[data-esp-install]');
+    if (espInstallButton) { await installEspDownload(); return; }
     var retryButton = e.target.closest('[data-retry-firmware]');
     if (retryButton) {
       await installBootselChoice(retryButton.dataset.retryFirmware, retryButton.dataset.firmwareName, false);
@@ -1406,6 +1674,8 @@
 
   // ── Viewing ──
   function resetView() {
+    activeBootselJobId = null;
+    activeEspJobId = null;
     curFile = null;
     editing = false;
     viewer.style.display = 'none';
@@ -1414,9 +1684,10 @@
     dirtyEl.classList.remove('on');
     bootselOptionsEl.classList.remove('visible');
     bootselOptionsEl.classList.remove('mount-help');
+    bootselOptionsEl.classList.remove('esp-install');
     bootselOptionsEl.innerHTML = '';
     bootselSourceEl.classList.remove('visible');
-    document.title = 'pico-bay';
+    document.title = 'Pico Bay';
     mainEl.classList.remove('bootsel-mode');
     mainEl.classList.remove('welcome-mode');
   }
@@ -1445,7 +1716,7 @@
     filenameEl.innerHTML = (f.path.indexOf('/') !== -1
         ? esc(f.path.slice(0, f.path.lastIndexOf('/') + 1)) : '') +
       '<b>' + esc(f.path.split('/').pop()) + '</b> · ' + humanSize(f.size);
-    document.title = 'pico-bay - ' + f.path.split('/').pop();
+    document.title = 'Pico Bay - ' + f.path.split('/').pop();
 
     var isPy = /\.py$/i.test(f.path);
     var writable = canWrite();
@@ -1757,14 +2028,19 @@
       title: 'Restore "' + file.name + '"?', confirmLabel: 'Restore'
     })) return;
     try {
-      var result = await api('/api/restore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/zip' },
-        body: file,
+      var restored = await withEspStorageRecovery(function () {
+        return api('/api/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/zip' },
+          body: file,
+        });
       });
+      if (restored.cancelled) return;
+      var result = restored.result;
       resetView();
       await loadFiles();
-      toast('Restored ' + result.restored + ' file' + (result.restored === 1 ? '' : 's'));
+      toast((restored.initialized ? 'Board storage initialized. ' : '') +
+        'Restored ' + result.restored + ' file' + (result.restored === 1 ? '' : 's'));
     } catch (e) { toast('Restore failed: ' + e.message, true); }
   });
   function downloadPath(p) {
@@ -1840,7 +2116,10 @@
     var cleanFolder = folderName.replace(/^[/]+|[/]+$/g, '');
     if (!cleanFolder) return;
     try {
-      await api('/api/mkdir?path=' + encodeURIComponent(cleanFolder), { method: 'POST' });
+      var created = await withEspStorageRecovery(function () {
+        return api('/api/mkdir?path=' + encodeURIComponent(cleanFolder), { method: 'POST' });
+      });
+      if (created.cancelled) return;
       await moveCurrentFileTo(cleanFolder);
     } catch (e) { toast('Could not create folder: ' + e.message, true); }
   }
@@ -1879,6 +2158,21 @@
     } catch (e) { toast('Delete failed: ' + e.message, true); }
   }
 
+  async function withEspStorageRecovery(operation) {
+    try {
+      return { result: await operation(), initialized: false, cancelled: false };
+    } catch (e) {
+      if (!/(?:Errno 19|ENODEV)/i.test(e.message)) throw e;
+      var confirmed = await confirmDialog(
+        'This ESP32 storage is not initialized. Initializing it will erase any files currently in its VFS partition.',
+        { title: 'Initialize board storage?', confirmLabel: 'Initialize storage', danger: true, defaultCancel: true }
+      );
+      if (!confirmed) return { result: null, initialized: false, cancelled: true };
+      await api('/api/storage/initialize?confirmed=1', { method: 'POST' });
+      return { result: await operation(), initialized: true, cancelled: false };
+    }
+  }
+
   async function newFile(parentDir) {
     if (!requireWriteAccess()) return;
     var name = await promptDialog('You may include a folder, for example scripts/blink.py.', '', {
@@ -1887,10 +2181,16 @@
     if (!name) return;
     name = parentDir ? parentDir + '/' + name.replace(/^[/]+/, '') : name;
     try {
-      await api('/api/touch?path=' + encodeURIComponent(name), { method: 'POST' });
+      var created = await withEspStorageRecovery(function () {
+        return api('/api/touch?path=' + encodeURIComponent(name), { method: 'POST' });
+      });
+      if (created.cancelled) return;
       await loadFiles();
       openFile(name.replace(/^[/]+/, ''));
-    } catch (e) { toast('Could not create: ' + e.message, true); }
+      if (created.initialized) toast('Board storage initialized');
+    } catch (e) {
+      toast('Could not create: ' + e.message, true);
+    }
   }
 
   async function newFolder(parentDir) {
@@ -1898,7 +2198,14 @@
     var name = await promptDialog('Enter a name for the new folder.', '', { title: 'New folder', confirmLabel: 'Create' });
     if (!name) return;
     name = parentDir ? parentDir + '/' + name.replace(/^[/]+/, '') : name;
-    try { await api('/api/mkdir?path=' + encodeURIComponent(name), { method: 'POST' }); loadFiles(); }
+    try {
+      var created = await withEspStorageRecovery(function () {
+        return api('/api/mkdir?path=' + encodeURIComponent(name), { method: 'POST' });
+      });
+      if (created.cancelled) return;
+      await loadFiles();
+      if (created.initialized) toast('Board storage initialized');
+    }
     catch (e) { toast('Could not create: ' + e.message, true); }
   }
 
@@ -1918,7 +2225,6 @@
     } catch (e) { toast('Rename failed: ' + e.message, true); }
   }
 
-  // Keep the editor fitted to the pane.
   window.addEventListener('resize', function () {
     if (editing) editorEl.style.height = Math.max(scrollEl.clientHeight - 4, 300) + 'px';
   });
@@ -1947,12 +2253,16 @@
         title: 'Overwrite file?', confirmLabel: 'Overwrite', danger: true
       })) continue;
       try {
-        await api('/api/file?path=' + encodeURIComponent(path), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: f,
+        var uploaded = await withEspStorageRecovery(function () {
+          return api('/api/file?path=' + encodeURIComponent(path), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: f,
+          });
         });
-        toast('Uploaded ' + path + ' (' + humanSize(f.size) + ')');
+        if (uploaded.cancelled) break;
+        toast((uploaded.initialized ? 'Board storage initialized. ' : '') +
+          'Uploaded ' + path + ' (' + humanSize(f.size) + ')');
       } catch (e) {
         toast('Upload failed for ' + path + ': ' + e.message, true);
       }
@@ -2073,6 +2383,68 @@
     } catch (e) { toast('Clean failed: ' + e.message, true); }
   }
 
+  async function waitForBootsel() {
+    for (var attempt = 0; attempt < 15; attempt++) {
+      await loadDevices(false);
+      var found = devices.find(function (candidate) {
+        return candidate.firmware === 'bootsel';
+      });
+      if (found) return found;
+      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+    }
+    return null;
+  }
+
+  async function doBootloader() {
+    if (!curDev || bootloaderPending) return;
+    closeMenu();
+    var device = currentDevice();
+    if (!device || !device.bootloaderMode) return;
+    var esp = device.bootloaderMode === 'download';
+    var targetDev = curDev;
+    var mode = esp ? 'download mode' : 'BOOTSEL mode';
+    bootloaderPending = true;
+    try {
+      if (!await confirmDialog('The board will restart in ' + mode + ' for firmware installation. To cancel afterward, unplug the USB cable and plug it back in without holding any buttons, before starting an installation.', {
+        title: 'Enter ' + mode + '?', confirmLabel: 'Enter ' + mode, danger: true
+      })) return;
+      var result = await api('/api/bootloader', { method: 'POST' }, targetDev);
+      if (esp && result.manual) {
+        await confirmDialog('', {
+          title: 'Enter download mode manually', confirmLabel: 'Got it', cancel: false,
+          messageHTML: '<p style="margin-bottom:26px"><span style="color:#cf222e">Automatic download mode did not succeed.</span><br>Choose either option:</p>' +
+            '<p><strong>Option 1 — Use RESET / EN</strong><br>' +
+            'Hold <strong>BOOT</strong>, then press and release <strong>RESET / EN</strong>.<br>' +
+            'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
+            '<p style="margin-top:22px"><strong>Option 2 — Reconnect USB</strong><br>' +
+            'Unplug the USB cable. Hold <strong>BOOT</strong> and plug USB back in.<br>' +
+            'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
+            '<p style="margin-top:26px">To cancel, unplug USB and plug it back in without holding any buttons.</p>'
+        });
+        return;
+      }
+      if (esp) {
+        toast('Entering download mode…');
+        setTimeout(function () { loadDevices(false); }, 250);
+      } else {
+        toast('BOOTSEL requested. Waiting for the board to appear…', false, 20000);
+        var bootsel = await waitForBootsel();
+        if (bootsel) {
+          toast('BOOTSEL device found.', false, 4000, true);
+        } else {
+          toast('Could not confirm BOOTSEL mode.', true);
+          await confirmDialog('', {
+            title: 'BOOTSEL device not confirmed', confirmLabel: 'Close', cancel: false,
+            messageHTML: '<p style="color:#cf222e">The BOOTSEL request was sent, but Pico Bay could not find a matching BOOTSEL device.</p>' +
+              '<p>Unplug the board, hold <strong>BOOTSEL</strong>, and reconnect USB. Keep holding for <strong>3 seconds</strong>, then release and select <strong>Scan</strong>.</p>' +
+              '<p>To cancel, unplug USB and plug it back in without holding any buttons.</p>'
+          });
+        }
+      }
+    } catch (e) { toast('Could not enter firmware install mode: ' + e.message, true); }
+    finally { bootloaderPending = false; }
+  }
+
   // ── Menu ──
   async function toggleSystemFiles() {
     hideSystemFiles = !hideSystemFiles;
@@ -2089,7 +2461,7 @@
     if (!readmeScreenEl || readmeScreenEl.style.display === 'none') return;
     readmeScreenEl.style.display = 'none';
     mainScreenEl.style.display = 'flex';
-    document.title = curFile ? 'pico-bay - ' + curFile.path.split('/').pop() : 'pico-bay';
+    document.title = curFile ? 'Pico Bay - ' + curFile.path.split('/').pop() : 'Pico Bay';
   }
   async function showReadme() {
     try {
@@ -2099,7 +2471,7 @@
       mainScreenEl.style.display = 'none';
       readmeScreenEl.style.display = 'block';
       readmeScreenEl.scrollTop = 0;
-      document.title = 'pico-bay - README.md';
+      document.title = 'Pico Bay - README.md';
     } catch (e) {
       toast('Could not open README.md: ' + e.message, true);
     }
@@ -2107,7 +2479,7 @@
   function showAbout() {
     showDialog({
       title: 'About Pico Bay',
-      messageHTML: 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, over USB.<br><br>' +
+      messageHTML: 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB.<br><br>' +
         '<strong>Author:</strong> ctrlPi<br>' +
         '<strong>Version:</strong> {{VERSION}}<br>' +
         '<strong>GitHub:</strong> <a href="https://github.com/ctrlpi/pico-bay" target="_blank" rel="noopener noreferrer">https://github.com/ctrlpi/pico-bay ↗</a><br>' +
@@ -2261,7 +2633,7 @@
 
   setEnabled(false);
   showWelcome();
-  refreshDevices(document.getElementById('refresh-btn'));
+  refreshDevices();
   setInterval(loadDevices, 3000);   // hot-plug: pills appear and vanish on their own
 </script>
 </body>

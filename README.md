@@ -1,12 +1,12 @@
-# pico-bay
+# Pico Bay
 
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
-[![Version 0.9.24](https://img.shields.io/badge/version-0.9.24-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.25](https://img.shields.io/badge/version-0.9.25-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
 
-`pico-bay` is an **App** and **MCP Server** for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, over USB. It runs with Node.js built-in modules and needs no browser extension or runtime npm dependencies.
+`pico-bay` is an **App** and **MCP Server** for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython over USB. It runs with Node.js built-in modules and needs no browser extension or runtime npm dependencies.
 
 ## Quick start
 
@@ -16,17 +16,17 @@ Requires Node.js 20 or newer.
 npx @ctrlpi/pico-bay
 ```
 
-Open [http://localhost:7426](http://localhost:7426) if it does not open automatically. On a Raspberry Pi host, pico-bay does not launch a browser; open it from another device on the same network instead.
+Your browser will open automatically! If it doesn't, head to [http://localhost:7426](http://localhost:7426). On a Raspberry Pi, open `http://PI_ADDRESS:7426` from another device on the same network, replacing `PI_ADDRESS` with the Pi's IP address or hostname.
 
 Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-phone era.
 
 ## Devices
 
-- Supports Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython, including Pico, Pico W, Pico 2, and Pico 2 W.
+- Supports Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython, including Pico, Pico W, Pico 2, Pico 2 W, ESP32, ESP32-S2, ESP32-C3, and ESP32-S3.
 - Detects multiple connected boards and follows USB hot-plug events.
 - Detects MicroPython or CircuitPython automatically, including whether its filesystem is read-only or writable.
 - Detects RP2040 and RP2350 BOOTSEL mode and installs the latest MicroPython firmware for the selected Pico model.
-- Detects Espressif ROM download mode over USB serial without extra dependencies, with a red device pill and detected chip details. ESP32 firmware installation is not supported.
+- Detects Espressif ROM download mode over USB serial, shows the detected chip details, and installs the latest generic MicroPython firmware on supported ESP32 chips.
 - Shows Flash and RAM usage for each board.
 - Supports soft reset, hard reset, Ctrl-C interruption, and filesystem cleanup.
 
@@ -48,11 +48,11 @@ Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-
 
 ## MCP server
 
-pico-bay includes a dependency-free [Model Context Protocol](https://modelcontextprotocol.io/) server. On macOS and other non-Pi hosts, enable MCP with `--mcp-stdio` or `--mcp-http`. Streamable HTTP MCP is enabled by default on Raspberry Pi hosts.
+pico-bay includes a dependency-free [Model Context Protocol](https://modelcontextprotocol.io/) server, enabled by default on Raspberry Pi hosts. On macOS and other non-Pi hosts, enable MCP in the user interface or with `--mcp-stdio` or `--mcp-http`.
 
-### stdio
+### Agent configuration
 
-In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers`:
+In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers` enabling stdio:
 
 ```json
 "mcpServers": {
@@ -102,23 +102,21 @@ The server supports MCP revision `2026-07-28` and the legacy initialize flow thr
 | `pico_python_run` | Run a file as `__main__` or execute Python code and return its output. |
 | `pico_board_interrupt` | Send Ctrl-C to interrupt a running program. |
 | `pico_board_reset` | Soft-reset a board or request a supported hard reset. |
-| `pico_install` | Check and install firmware on a board in BOOTSEL mode. Currently supports MicroPython. |
+| `pico_install` | Check and install MicroPython on a Pico in BOOTSEL mode or a supported ESP32 in DOWNLOAD mode. |
 
 Call `pico_boards_list` first, then pass its `board_id` to board-specific tools. ZIP backup/restore, live console streaming, and **Delete all files** are intentionally not exposed through MCP.
 
 ## Installing MicroPython in BOOTSEL mode
 
-To enter BOOTSEL mode, disconnect the board, hold its **BOOTSEL** button, reconnect USB, then release the button. pico-bay shows the RP2040 or RP2350 boot device as a red pill. Select it and choose if this is a W model (with Wi-Fi) or not, as it is not autodetectable.
+On a Pico running MicroPython or CircuitPython, select **Enter BOOTSEL mode** from the top-right menu and confirm. To enter manually, disconnect the board, hold its **BOOTSEL** button, and reconnect USB while continuing to hold it. Keep holding for 3 seconds, then release. pico-bay shows the RP2040 or RP2350 boot device as a red pill. Select it and choose if this is a W model (with Wi-Fi) or not, as it is not autodetectable. To cancel before installing firmware, unplug USB and plug it back in without holding any buttons.
 
-pico-bay confirms the operation, downloads the latest matching MicroPython UF2 from [micropython.org](https://micropython.org/download/), and copies it to the boot volume. Keep the board connected during installation. It reboots automatically and then appears as a normal MicroPython device.
+pico-bay confirms the operation, downloads the latest matching MicroPython UF2 from [micropython.org](https://micropython.org/download/), validates it, and copies it to the boot volume. The screen reports the download, validation, installation, and reboot stages. Keep the board connected during installation. It reboots automatically and then appears as a normal MicroPython device.
 
 ## ESP32 download mode
 
-Hold **BOOT**, tap **RESET / EN**, then release **BOOT** to enter the serial ROM bootloader on boards with these buttons. Click **Scan** in pico-bay. After the initial Python probe fails, a read-only handshake detects download mode; no USB storage folder is required.
+Select **Enter download mode…** from the top-right menu and confirm. For manual entry, hold **BOOT/IO0**, press and release **RESET / EN**, and keep holding **BOOT/IO0** for 3 seconds, then release. Alternatively, unplug USB and hold **BOOT/IO0**. Plug the USB cable back in while continuing to hold **BOOT/IO0**. Keep holding for 3 seconds, then release. Click **Scan** in pico-bay, then select the red **DOWNLOAD** pill to see the detected chip and security details. To cancel before installing firmware, unplug USB and plug it back in without holding any buttons.
 
-The red **DOWNLOAD** pill opens a details screen showing the chip family, serial port, baud rate, and available ROM identifiers. Classic ESP32 also reports its MAC address when readable. ESP32, ESP32-S2, ESP32-C3, and ESP32-S3 have named identification; other responding Espressif chips show an unidentified chip label and any available chip ID. Firmware version, board model, and flash capacity are not inferred from the chip family.
-
-This feature only detects the bootloader: it does not erase, flash, upload a helper, or automatically change the boot mode. To return to normal operation, release **BOOT**, press **RESET / EN**, then click **Scan** again. Ordinary polling uses cached identification to avoid interrupting running programs.
+Select **Install MicroPython** to download, validate, install, and verify the latest official generic build. **Erase and initialize storage** is selected by default and runs after firmware verification, before reboot; uncheck it to preserve existing files. The screen shows each stage and the write progress percentage. Installation uses the ESP32 ROM without extra dependencies and is disabled when the chip is unsupported, unidentified, or protected by flash security.
 
 ## Requirements
 
@@ -265,6 +263,11 @@ Do not expose it to an untrusted network.
 - Use a USB data cable and check that its serial device appears under `/dev`.
 - On Linux, check serial permissions, commonly provided by the `dialout` group.
 - Close Thonny, `mpremote`, screen, and other programs that may own the serial port.
+- For identification or installation failures, check the Pico Bay terminal for the underlying error.
+
+### BOOTSEL does not appear
+
+On Linux, check `lsusb`, `lsblk -p -o NAME,LABEL,FSTYPE,MOUNTPOINT`, and `sudo dmesg | tail -60`. USB enumeration errors must be resolved before mounting can work; try another data cable or USB port and check the Pi's power supply. An unmounted `RPI-RP2` or `RP2350` volume should still appear in Pico Bay.
 
 ### A command times out
 
@@ -284,7 +287,7 @@ Run the dependency-free test suite with:
 npm test
 ```
 
-The single `test.js` file covers pure parsing and ZIP helpers plus mocked HTTP behavior for both MicroPython and CircuitPython. It also checks for connected serial boards after those tests pass. With no board attached, the hardware section is skipped. MicroPython and writable CircuitPython boards get temporary file/folder write-read-delete checks; read-only CircuitPython boards get non-destructive capability and console checks.
+`test.js` covers parsing, ZIP handling, device discovery, HTTP and MCP APIs, and mocked firmware installation. The optional hardware section reports every discovered board, explicitly skipping unidentified and bootloader devices. Other boards continue testing: MicroPython and writable CircuitPython receive temporary file/folder write-read-delete checks; read-only CircuitPython receives capability and console checks. With no devices found, the hardware section is skipped.
 
 ## Known limits
 

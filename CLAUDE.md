@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working in this repository.
 
 ## What this is
 
-`pico-bay` is an app and MCP server for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode.
+`pico-bay` is an app and MCP server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode and supported ESP32 boards in ROM download mode.
 
 The app uses only Node.js built-in modules at runtime and has no build step. The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
 
@@ -47,8 +47,10 @@ Important HTTP routes include:
 - `/api/devices`, `/api/files`, and `/api/file` for discovery and files.
 - `/api/mkdir`, `/api/touch`, `/api/rename`, and `/api/clean` for mutations.
 - `/api/zip`, `/api/download-all`, and `/api/restore` for backups.
-- `/api/run`, `/api/interrupt`, `/api/reset`, and `/api/console` for board control.
-- `/api/bootsel/install` for MicroPython UF2 installation.
+- `/api/run`, `/api/interrupt`, `/api/reset`, `/api/bootloader`, and `/api/console` for board control.
+- `/api/bootsel/install` and `/api/bootsel/install/status` for background MicroPython UF2 installation and stage reporting.
+- `/api/esp/install` and `/api/esp/install/status` for confirmed background MicroPython installation and progress through the ESP ROM loader.
+- `/api/storage/initialize` for explicitly confirmed recovery of an uninitialized ESP32 MicroPython VFS partition.
 - `/api/readme` for the full-screen README view.
 - `/mcp` when Streamable HTTP MCP is enabled.
 
@@ -84,6 +86,10 @@ Raspberry Pi OS Lite may detect USB storage without mounting it. The app uses `l
 
 BOOTSEL volumes labeled `RPI-RP2` or `RP2350` appear as non-operable red devices. The selected chip family limits the available Pico models, but Pico versus Pico W cannot be autodetected. Firmware downloads must remain HTTPS-only, host-restricted, size-limited, and UF2-header validated before being copied to the mounted boot volume.
 
+## ESP32 installation
+
+ESP32, ESP32-S2, ESP32-C3, and ESP32-S3 ROM download mode appears as a red DOWNLOAD device. Installation uses only the built-in ROM protocol at 115200 baud. Select the latest stable generic `.bin` from the matching official MicroPython download page, validate its ESP image header, chip ID, segments, and checksum before writing, and verify the flashed bytes with `SPI_FLASH_MD5` before rebooting. Refuse installation when the chip is unknown, its security state cannot be read, or secure download, secure boot, or flash encryption is enabled. The checked-by-default storage option uses a named `vfs` partition when present, or the flash space after the last partition used by current official images. Locate this region before writing; erase and verify it with the ROM compressed-flash commands only after firmware verification and before reboot. It uses Node's built-in `zlib` and does not perform a full-chip erase.
+
 ## Frontend
 
 `page.html` contains all frontend HTML, CSS, and JavaScript and is served after replacing `{{VERSION}}`. It must remain valid without a build step.
@@ -98,7 +104,7 @@ Run the complete dependency-free suite with:
 npm test
 ```
 
-`test.js` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP, and BOOTSEL installation. It also acts as the test reporter to normalize duration output for local and CI runs.
+`test.js` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP, BOOTSEL installation, and ESP32 ROM installation. It also acts as the test reporter to normalize duration output for local and CI runs.
 
 After the non-hardware tests pass, the suite scans for connected boards. With no board, the physical section is skipped. MicroPython and writable CircuitPython boards receive temporary file/folder write-read-delete checks. Read-only CircuitPython boards receive non-destructive capability and console checks. Each firmware uses its own protocol path, and all temporary files must be removed in `finally` cleanup.
 
