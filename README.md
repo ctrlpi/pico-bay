@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
-[![Version 0.9.25](https://img.shields.io/badge/version-0.9.25-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.27](https://img.shields.io/badge/version-0.9.27-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
@@ -16,13 +16,13 @@ Requires Node.js 20 or newer.
 npx @ctrlpi/pico-bay
 ```
 
-Your browser will open automatically! If it doesn't, head to [http://localhost:7426](http://localhost:7426). On a Raspberry Pi, open `http://PI_ADDRESS:7426` from another device on the same network, replacing `PI_ADDRESS` with the Pi's IP address or hostname.
+Your browser will open automatically! If it doesn't, head to [http://localhost:7426](http://localhost:7426). On a Raspberry Pi, open `http://PI_HOST_ADDR:7426` from another device on the same network, replacing `PI_HOST_ADDR` with the Pi's IP address or hostname.
 
 Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-phone era.
 
 ## Devices
 
-- Supports Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython, including Pico, Pico W, Pico 2, Pico 2 W, ESP32, ESP32-S2, ESP32-C3, and ESP32-S3.
+- Supports Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython, including Pico, Pico W, Pico 2, Pico 2 W, ESP32, ESP32-C3, and ESP32-S3.
 - Detects multiple connected boards and follows USB hot-plug events.
 - Detects MicroPython or CircuitPython automatically, including whether its filesystem is read-only or writable.
 - Detects RP2040 and RP2350 BOOTSEL mode and installs the latest MicroPython firmware for the selected Pico model.
@@ -71,13 +71,13 @@ Use HTTP when the MCP client runs on another computer or Raspberry Pi:
 npx @ctrlpi/pico-bay --mcp-http
 ```
 
-The normal web interface remains available and MCP is served at `http://HOST:7426/mcp`. Configure the MCP agent to connect over HTTP, replacing `PI_ADDRESS` with the platform running pico-bay:
+The normal web interface remains available and MCP is served at `http://HOST:7426/mcp`. Configure the MCP agent to connect over HTTP, replacing `PI_HOST_ADDR` with the platform running pico-bay:
 
 ```json
 "mcpServers": {
   "pico-bay": {
     "command": "npx",
-    "args": ["-y", "mcp-remote", "http://PI_ADDRESS:7426/mcp", "--allow-http"]
+    "args": ["-y", "mcp-remote", "http://PI_HOST_ADDR:7426/mcp", "--allow-http"]
   }
 }
 ```
@@ -121,9 +121,11 @@ Select **Install MicroPython** to download, validate, install, and verify the la
 ## Requirements
 
 - Node.js 20 or newer.
-- Raspberry Pi OS, macOS, or Linux. Windows can access pico-bay through a Raspberry Pi but cannot host it.
+- MacOS, Linux, Windows, or Raspberry Pi OS.
 - A USB-connected Raspberry Pi Pico or ESP32 board running MicroPython or CircuitPython, or a supported board in bootloader mode.
 - Permission to open the board's serial device.
+- On Windows, the .NET Framework v4 C# compiler (`csc.exe`) is required to build the serial helper automatically at startup.
+- For ESP32 on Windows, the appropriate serial driver installed (see [Troubleshooting](#no-board-appears)).
 
 ## Install
 
@@ -260,8 +262,9 @@ Do not expose it to an untrusted network.
 ### No board appears
 
 - For file access, confirm that the board is running MicroPython or CircuitPython. Supported bootloader modes appear as red device pills instead.
-- Use a USB data cable and check that its serial device appears under `/dev`.
+- Use a USB data cable and check that its serial device appears under `/dev` on macOS/Linux or **Ports (COM & LPT)** in Windows Device Manager.
 - On Linux, check serial permissions, commonly provided by the `dialout` group.
+- On Windows, if your ESP32 board is not detected at all, you may be missing its serial driver. Many ESP32 boards use a CP210x USB to UART bridge. Download the [CP210x Universal Windows Driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers) and extract the ZIP. Open **Device Manager**, find the unrecognized device (often under "Other devices"), right-click it, select **Update driver** → **Browse my computer for drivers**, and select the extracted folder.
 - Close Thonny, `mpremote`, screen, and other programs that may own the serial port.
 - For identification or installation failures, check the Pico Bay terminal for the underlying error.
 
@@ -287,11 +290,10 @@ Run the dependency-free test suite with:
 npm test
 ```
 
-`test.js` covers parsing, ZIP handling, device discovery, HTTP and MCP APIs, and mocked firmware installation. The optional hardware section reports every discovered board, explicitly skipping unidentified and bootloader devices. Other boards continue testing: MicroPython and writable CircuitPython receive temporary file/folder write-read-delete checks; read-only CircuitPython receives capability and console checks. With no devices found, the hardware section is skipped.
+`test.js` covers parsing, ZIP handling, device discovery, HTTP and MCP APIs, and mocked firmware installation. The optional hardware section reports every discovered board, skipping bootloader devices and failing unidentified devices. Other boards continue testing: MicroPython and writable CircuitPython receive temporary file/folder write-read-delete checks; read-only CircuitPython receives capability and console checks. With no devices found, the hardware section is skipped.
 
 ## Known limits
 
-- Windows cannot host pico-bay; access it through a Raspberry Pi or another supported host instead.
 - Filesystem operations temporarily stop the running application.
 - Uploads are limited to 8 MB; ZIP restore supports Store or Deflate with up to 512 files and 16 MB decompressed.
 - Concurrent file-change conflict detection is not provided.

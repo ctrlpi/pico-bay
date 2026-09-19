@@ -6,9 +6,9 @@ This file provides guidance to Claude Code when working in this repository.
 
 `pico-bay` is an app and MCP server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode and supported ESP32 boards in ROM download mode.
 
-The app uses only Node.js built-in modules at runtime and has no build step. The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
+The app uses only Node.js built-in modules for its JavaScript runtime and has no frontend build step. On Windows, it compiles [combridge.cs](combridge.cs) into a native serial helper at startup using the installed .NET Framework C# compiler (`csc.exe`). The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
 
-The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `page.html`, `README.md`, `test.js`, and `LICENSE`. Update the version in `package.json` before publishing.
+The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `combridge.cs`, `page.html`, `README.md`, `test.js`, and `LICENSE`. Update the version in `package.json` before publishing.
 
 ## Running
 
@@ -56,7 +56,9 @@ Important HTTP routes include:
 
 ## Serial and device constraints
 
-- **Node has no serial API.** Ports are opened with `fs.openSync(dev, O_RDWR|O_NOCTTY)` and configured through `stty`. macOS uses `-f`, Linux uses `-F`, and macOS must use `cu.*` devices rather than `tty.*`.
+- **Node has no serial API.** On macOS and Linux, ports are opened with `fs.openSync(dev, O_RDWR|O_NOCTTY)` and configured through `stty`. macOS uses `-f`, Linux uses `-F`, and macOS must use `cu.*` devices rather than `tty.*`.
+
+- **Windows serial bridge.** [combridge.cs](combridge.cs) (`ComBridge`) opens and configures COM ports through Win32 APIs, streams serial data through standard input/output, and receives DTR/RTS commands over a named pipe. Windows port discovery reads `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM`. At startup, the app locates `csc.exe` in the .NET Framework v4 `Framework64` or `Framework` directory and compiles the helper if its versioned `pico-bay-combridge-<version>.exe` is absent from the system temporary directory. Startup fails if the compiler is unavailable. Keep the helper source in the npm package; when changing it during development, remove the cached executable or change the package version so it is rebuilt.
 
 - **`min 0 time 1` is required.** It prevents a raw TTY read from blocking the server indefinitely when no bytes are available.
 

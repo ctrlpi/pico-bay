@@ -1,0 +1,20 @@
+# Dependencies (just in case)
+node_modules/
+package-lock.json
+
+# Env & Logs
+venv/
+.venv/
+.env
+.env.local
+*.log*
+
+# macOS
+.DS_Store
+.AppleDouble
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp

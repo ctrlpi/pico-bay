@@ -1179,7 +1179,8 @@
       if (!selectedDevice.probing) {
         bootselOptionsEl.classList.add('visible', 'mount-help');
         bootselOptionsEl.innerHTML = '<div class="recovery-steps">' +
-          '<strong>To start normally: release BOOT, then press RESET / EN.</strong>' +
+          '<strong class="install-unavailable">Please unplug the board and plug it back in.</strong><br>' +
+          'If it still fails, consider reinstalling the firmware.<br><br>' +
           '</div><button class="btn" data-rescan>Rescan</button>';
       }
       return;

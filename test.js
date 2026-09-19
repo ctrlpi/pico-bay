@@ -174,12 +174,14 @@ describe('ESP ROM detection', () => {
 
   test('selects native USB reset for C3/S3 while preserving external UART reset', () => {
     for (const machine of ['ESP32C3 module with ESP32-C3', 'ESP32-S3']) {
-      for (const dev of ['/dev/cu.usbmodem101', '/dev/ttyACM0']) {
+      for (const dev of ['/dev/cu.usbmodem101', '/dev/ttyACM0', 'COM7']) {
         assert.equal(viewer.espResetStrategies({ machine }, dev)[0], 'usb-jtag');
+        assert.ok(viewer.espResetStrategies({ machine }, dev).includes('classic'));
       }
       assert.equal(viewer.espResetStrategies({ machine }, '/dev/ttyUSB0')[0], 'tight');
     }
     assert.equal(viewer.espResetStrategies({ machine: 'ESP32' }, '/dev/cu.usbserial-0001')[0], 'tight');
+    assert.equal(viewer.espResetStrategies({ machine: 'ESP32' }, 'COM7')[0], 'tight');
   });
 
   function makeEspImage(chipId, content = Buffer.from('pico-bay ESP firmware test')) {
@@ -745,6 +747,41 @@ describe('pure helpers', () => {
     assert.equal(viewer.cleanPath('../secret'), null);
     assert.equal(viewer.cleanPath('lib/./secret'), null);
     assert.equal(viewer.cleanPath('bad\0name'), null);
+    assert.equal(viewer.cleanPath('\\'), null);
+    assert.equal(viewer.cleanPath('lib\\..'), null);
+  });
+
+  test('mounted paths reject roots and Windows traversal while allowing drive-root children', () => {
+    const mountedPath = viewer._test.mountedPath;
+    for (const bad of ['/', '.', '..', '\\', 'lib\\..', '../outside', 'E:', 'E:/', 'C:/secret', 'lib/.. ', '...']) {
+      assert.equal(mountedPath('E:\\', bad, path.win32), null, bad);
+    }
+    assert.equal(mountedPath('E:\\', 'lib/code.py', path.win32), 'E:\\lib\\code.py');
+    assert.equal(mountedPath('/Volumes/CIRCUITPY', 'lib/code.py', path.posix), '/Volumes/CIRCUITPY/lib/code.py');
+    assert.equal(mountedPath('/Volumes/CIRCUITPY', '/', path.posix), null);
+  });
+
+  test('hardware-test failure still cleans up its empty file', async t => {
+    const written = [], removed = [];
+    t.mock.method(viewer, 'writeFile', async (_dev, file) => { written.push(file); });
+    t.mock.method(viewer, 'readFile', async (_dev, file) => {
+      if (file.endsWith('_empty')) throw new Error('empty read failed');
+      return Buffer.from('pico-bay hardware test\n');
+    });
+    t.mock.method(viewer, 'removePath', async (_dev, file) => { removed.push(file); });
+    await assert.rejects(testPhysicalMicroPython({ dev: '/dev/mock' }), /empty read failed/);
+    assert.equal(written.length, 2);
+    for (const file of written) assert.ok(removed.includes(file), file);
+  });
+
+  test('CircuitPython console checks reject marker-containing errors and stderr', async t => {
+    const device = firmwareInfo('circuitpython', true);
+    t.mock.method(viewer, 'requireWritable', async () => { throw new Error('read-only'); });
+    let command = async () => { throw new Error('timeout after PICO_BAY_CONSOLE_OK'); };
+    t.mock.method(viewer, 'getPort', () => ({ command: (...args) => command(...args) }));
+    await assert.rejects(testPhysicalCircuitPython(device), /timeout after/);
+    command = async () => ({ out: 'PICO_BAY_CONSOLE_OK\n', err: 'RuntimeError: failed\n' });
+    await assert.rejects(testPhysicalCircuitPython(device), /must not produce stderr/);
   });
 
   test('detects Raspberry Pi hosts from the Linux model string', () => {
@@ -1055,7 +1092,7 @@ describe('pure helpers', () => {
       fs.writeFileSync(path.join(root, 'code.py'), 'print(1)');
       fs.writeFileSync(path.join(root, 'lib', 'helper.py'), 'value = 1');
       fs.writeFileSync(path.join(root, '.hidden'), 'system');
-      fs.symlinkSync(os.tmpdir(), path.join(root, 'outside'));
+      fs.symlinkSync(os.tmpdir(), path.join(root, 'outside'), process.platform === 'win32' ? 'junction' : null);
       assert.deepEqual(viewer.listMountedFiles(root).map(file => file.path), [
         'code.py', 'lib', 'lib/helper.py',
       ]);
@@ -1120,7 +1157,7 @@ describe('pure helpers', () => {
     assert.equal(port.fd, null);
     assert.equal(port.closing, true);
     await new Promise(resolve => setImmediate(resolve));
-    assert.throws(() => port._open(), /still closing/);
+    await assert.rejects(port._open(), /still closing/);
     await assert.rejects(port._waitForClose(20), /still closing/);
     finishClose(null);
     assert.equal(port.closing, false);
@@ -1886,6 +1923,135 @@ describe('mocked HTTP API', () => {
   });
 });
 
+describe('Windows serial lifecycle', () => {
+  // Exercise the actual Windows branch without a compiler, COM port, or named pipe.
+  function setup(t) {
+    const { EventEmitter } = require('node:events');
+    const children = [], servers = [];
+    const fakeRequire = name => {
+      if (name === 'fs') return { ...fs, existsSync: file => String(file).endsWith('.exe') || fs.existsSync(file) };
+      if (name === 'net') return { createServer() {
+        const server = new EventEmitter();
+        server.listen = () => {};
+        server.close = () => {};
+        servers.push(server);
+        return server;
+      } };
+      if (name === 'child_process') return { ...require(name), spawn() {
+        const child = new EventEmitter();
+        Object.assign(child, { pid: 123, exitCode: null, signalCode: null });
+        child.stdin = new EventEmitter();
+        child.stdin.end = () => {};
+        child.stdin.write = (_data, callback) => { if (callback) callback(); return true; };
+        child.stdout = new EventEmitter();
+        child.stop = () => { child.exitCode = 0; child.emit('exit', 0); child.emit('close', 0); };
+        children.push(child);
+        return child;
+      } };
+      return require(name);
+    };
+    const context = {
+      require: fakeRequire, module: { exports: {} }, __dirname, Buffer, console,
+      process: { ...process, platform: 'win32', env: { ...process.env } },
+      setTimeout, clearTimeout, setInterval, clearInterval, URL,
+    };
+    require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, 'pico-bay.js'), 'utf8'), context);
+    const api = context.module.exports;
+    const port = api.getPort('COM7');
+    t.after(() => { for (const child of children) child.stop(); port._close(); });
+    const connect = () => {
+      const control = new EventEmitter();
+      control.destroy = () => { control.destroyed = true; };
+      control.write = (_data, callback) => { if (callback) callback(); return true; };
+      servers.at(-1).emit('connection', control);
+      return control;
+    };
+    return { api, port, children, servers, connect };
+  }
+
+  test('reopens after the helper has already exited', async t => {
+    const { port, children, connect } = setup(t);
+    let opening = port._open(); connect(); await opening;
+    children[0].stop();
+    assert.equal(port.closing, false);
+    assert.equal(port.winPort, null);
+    await port._waitForClose(20);
+    opening = port._open(); connect(); await opening;
+    assert.equal(children.length, 2);
+    await port.write('hello');
+  });
+
+  test('waits for helper shutdown when explicitly closing a live port', async t => {
+    const { port, children, connect } = setup(t);
+    const opening = port._open(); connect(); await opening;
+    port._close();
+    assert.equal(port.closing, true);
+    children[0].stop();
+    await port._waitForClose(20);
+    assert.equal(port.closing, false);
+  });
+
+  test('rejects failed helper startup without leaving the port closing', async t => {
+    const { port, children } = setup(t);
+    const opening = port._open();
+    children[0].pid = undefined;
+    children[0].emit('error', new Error('spawn failed'));
+    await assert.rejects(opening, /Board disconnected/);
+    assert.equal(port.closing, false);
+    assert.equal(port.winPortServer, null);
+  });
+
+  test('handles named-pipe server failures during startup', async t => {
+    const { port, children, servers } = setup(t);
+    const opening = port._open();
+    servers[0].emit('error', new Error('pipe unavailable'));
+    await assert.rejects(opening, /Board disconnected/);
+    children[0].stop();
+    assert.equal(port.closing, false);
+  });
+
+  for (const stream of ['stdin', 'stdout', 'control']) {
+    test('disconnects and rejects pending reads on ' + stream + ' errors', async t => {
+      const { port, children, connect } = setup(t);
+      const opening = port._open(); const control = connect(); await opening;
+      const read = port.readUntil('never', 1000);
+      const rejected = assert.rejects(read, /Board disconnected/);
+      (stream === 'control' ? control : children[0][stream]).emit('error', new Error('broken pipe'));
+      await rejected;
+      children[0].stop();
+      await port._waitForClose(20);
+      assert.equal(port.winPort, null);
+    });
+  }
+
+  test('propagates write and reset-control failures to the caller', async t => {
+    const { api, port, children, connect } = setup(t);
+    const opening = port._open(); const control = connect(); await opening;
+    children[0].stdin.write = (_data, callback) => callback(new Error('write failed'));
+    await assert.rejects(port.write('hello'), /write failed/);
+    control.write = (_data, callback) => callback(new Error('reset failed'));
+    await assert.rejects(api._test.winResetEspLines(port, 'normal'), /reset failed/);
+    await assert.rejects(api._test.winResetEspLines({}, 'normal'), /unavailable/);
+  });
+
+  test('sends Ctrl-C through the Windows helper when interrupting a board', async t => {
+    const { api, port, children, connect } = setup(t);
+    const opening = port._open(); connect(); await opening;
+    port.info = { ...firmwareInfo('micropython', false), dev: port.dev };
+    api._test.setDevices([{ dev: port.dev, port }]);
+    const writes = [];
+    children[0].stdin.write = (data, callback) => {
+      writes.push(Buffer.from(data));
+      if (callback) callback();
+      return true;
+    };
+    const result = await api.MCP_TOOLS.find(tool => tool.name === 'pico_board_interrupt')
+      .handler({ board_id: port.dev });
+    assert.equal(result.structuredContent.ok, true);
+    assert.ok(Buffer.concat(writes).includes(3), 'Interrupt must send Ctrl-C, not only report success');
+  });
+});
+
 describe('console serial lifecycle', () => {
   async function setup(t) {
     const port = viewer.getPort('/dev/test-console');
@@ -2049,16 +2215,23 @@ describe('optional physical boards', () => {
             return;
           }
           if (!device.ok) {
-            t.skip(device.error || 'device probe failed');
+            assert.fail(device.error || 'device probe failed');
             return;
           }
           if (device.firmware === 'micropython') {
-            await testPhysicalMicroPython(device);
+            assert.ok(device.uid, 'MicroPython serial number is missing');
           } else if (device.firmware === 'circuitpython') {
-            await testPhysicalCircuitPython(device);
+            await t.test('capabilities and strict console response', () => testPhysicalCircuitPython(device));
           } else {
             assert.fail('unsupported connected firmware: ' + device.firmware);
           }
+          if (!device.readOnly) {
+            await t.test('text, empty file, listing, and deletion', () => testPhysicalMicroPython(device));
+            await t.test('binary boundaries, overwrite, and truncation', () => testPhysicalBinaryFiles(device));
+            await t.test('nested directories and file/folder renames', () => testPhysicalRenames(device));
+          }
+          await t.test('Python exception and command recovery', () => testPhysicalErrorRecovery(device));
+          await t.test('run, interrupt, and run again', () => testPhysicalInterrupt(device));
         });
       }
     } finally {
@@ -2072,11 +2245,16 @@ async function testPhysicalMicroPython(device) {
   const file = 'pico_bay_test_' + suffix + '.txt';
   const folder = 'pico_bay_test_' + suffix;
   const nested = folder + '/inside.txt';
+  const empty = file + '_empty';
   const content = Buffer.from('pico-bay hardware test\n');
 
   try {
     await viewer.writeFile(device.dev, file, content);
     assert.deepEqual(await viewer.readFile(device.dev, file), content);
+
+    await viewer.writeFile(device.dev, empty, Buffer.alloc(0));
+    assert.deepEqual(await viewer.readFile(device.dev, empty), Buffer.alloc(0));
+    await viewer.removePath(device.dev, empty);
 
     await viewer.makeDirectory(device.dev, folder);
     await viewer.writeFile(device.dev, nested, content);
@@ -2092,6 +2270,7 @@ async function testPhysicalMicroPython(device) {
     assert.equal(remaining.includes(folder), false);
     assert.equal(remaining.includes(nested), false);
   } finally {
+    await viewer.removePath(device.dev, empty).catch(() => {});
     await viewer.removePath(device.dev, file).catch(() => {});
     await viewer.removePath(device.dev, folder).catch(() => {});
   }
@@ -2106,21 +2285,124 @@ async function testPhysicalCircuitPython(device) {
     read: true, write: !device.readOnly, run: true, console: true,
   });
   if (device.readOnly) await assert.rejects(viewer.requireWritable(device.dev), /read-only/);
-  else await testPhysicalMicroPython(device);
   const port = viewer.getPort(device.dev);
-  let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const result = await port.command(pt => pt.exec(
-        "print('PVI_READY');print('PICO_BAY_CONSOLE_OK')",
-      ));
-      assert.match(viewer.cleanReplOutput(result.out), /PICO_BAY_CONSOLE_OK/);
-      return;
-    } catch (error) {
-      if (/PICO_BAY_CONSOLE_OK/.test(String(error.message || error))) return;
-      lastError = error;
+  const result = await port.command(pt => pt.exec("print('PICO_BAY_CONSOLE_OK')"));
+  assert.equal(result.err.trim(), '', 'Console command must not produce stderr');
+  assert.equal(viewer.cleanReplOutput(result.out).trim(), 'PICO_BAY_CONSOLE_OK');
+}
+
+async function withPhysicalTestDirectory(device, check) {
+  const root = 'pico_bay_test_' + process.pid + '_' + require('node:crypto').randomBytes(6).toString('hex');
+  let created = false;
+  try {
+    await viewer.makeDirectory(device.dev, root);
+    created = true;
+    await check(root);
+  } finally {
+    if (created) {
+      await viewer.removePath(device.dev, root);
+      assert.ok(!(await viewer.listFiles(device.dev)).some(entry => entry.path === root || entry.path.startsWith(root + '/')),
+        'Temporary test directory must be completely removed');
     }
   }
-  throw lastError;
+}
+
+async function testPhysicalBinaryFiles(device) {
+  await withPhysicalTestDirectory(device, async root => {
+    const file = root + '/bytes.bin';
+    // Include NUL, Ctrl-C/Ctrl-D, high bytes, and every possible byte value.
+    for (const size of [255, 256, 257, 1023, 1024, 1025, 16384]) {
+      const content = Buffer.from(Array.from({ length: size }, (_, i) => i & 255));
+      await viewer.writeFile(device.dev, file, content);
+      assert.deepEqual(await viewer.readFile(device.dev, file), content, size + '-byte binary round trip');
+      const entry = (await viewer.listFiles(device.dev)).find(entry => entry.path === file);
+      assert.ok(entry, 'Binary file must be listed');
+      assert.equal(entry.size, size);
+    }
+    for (const content of [Buffer.from([0, 255, 3]), Buffer.alloc(0)]) {
+      await viewer.writeFile(device.dev, file, content);
+      assert.deepEqual(await viewer.readFile(device.dev, file), content, 'Overwrite must truncate previous contents');
+      assert.equal((await viewer.listFiles(device.dev)).find(entry => entry.path === file).size, content.length);
+    }
+  });
+}
+
+async function testPhysicalRenames(device) {
+  await withPhysicalTestDirectory(device, async root => {
+    const folder = root + '/nested/deeper';
+    const content = Buffer.from('rename preserves content\n');
+    await viewer.makeDirectory(device.dev, folder);
+    await viewer.writeFile(device.dev, folder + '/original.txt', content);
+    await viewer.renamePath(device.dev, folder + '/original.txt', folder + '/renamed.txt');
+    assert.deepEqual(await viewer.readFile(device.dev, folder + '/renamed.txt'), content);
+    assert.ok(!(await viewer.listFiles(device.dev)).some(entry => entry.path === folder + '/original.txt'));
+    await viewer.renamePath(device.dev, root + '/nested', root + '/moved');
+    assert.deepEqual(await viewer.readFile(device.dev, root + '/moved/deeper/renamed.txt'), content);
+    assert.ok(!(await viewer.listFiles(device.dev)).some(entry => entry.path === root + '/nested' || entry.path.startsWith(root + '/nested/')));
+  });
+}
+
+function physicalTool(device, name, args = {}) {
+  return viewer.MCP_TOOLS.find(tool => tool.name === name).handler({ board_id: device.dev, ...args });
+}
+
+async function testPhysicalErrorRecovery(device) {
+  const failed = await physicalTool(device, 'pico_python_run', { code: "raise ValueError('PICO_BAY_EXPECTED_ERROR')" });
+  assert.equal(failed.isError, true);
+  assert.match(failed.structuredContent.err, /ValueError: PICO_BAY_EXPECTED_ERROR/);
+  const recovered = await physicalTool(device, 'pico_python_run', { code: "print('PICO_BAY_RECOVERED')" });
+  assert.equal(recovered.structuredContent.ok, true);
+  assert.equal(recovered.structuredContent.err.trim(), '');
+  assert.equal(viewer.cleanReplOutput(recovered.structuredContent.out).trim(), 'PICO_BAY_RECOVERED');
+}
+
+async function within(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function testPhysicalInterrupt(device) {
+  const port = viewer.getPort(device.dev);
+  let ready, output = '', settled = false;
+  const started = new Promise(resolve => { ready = resolve; });
+  const monitor = (type, text) => {
+    if (type !== 'out') return;
+    output += text;
+    if (output.includes('PICO_BAY_INTERRUPT_READY')) ready();
+  };
+  port.monitors.add(monitor);
+  // A bounded loop also terminates if the application fails to deliver Ctrl-C.
+  const run = physicalTool(device, 'pico_python_run', { code:
+    "import time\nprint('PICO_BAY_INTERRUPT_READY')\nfor _pico_test_i in range(100):\n    time.sleep(0.1)\nprint('PICO_BAY_INTERRUPT_MISSED')",
+  });
+  const completion = run.then(result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
+  try {
+    await within(Promise.race([started, completion.then(() => {
+      throw new Error('Program finished before interruption could be tested');
+    })]), 8000, 'Program did not announce readiness');
+    const interrupted = await physicalTool(device, 'pico_board_interrupt');
+    assert.equal(interrupted.structuredContent.ok, true);
+    const ended = await within(completion, 3000, 'Interrupt reported success but the program kept running');
+    if (ended.error) throw ended.error;
+    assert.equal(ended.result.isError, true);
+    assert.match(ended.result.structuredContent.err, /KeyboardInterrupt/);
+    assert.doesNotMatch(ended.result.structuredContent.out, /PICO_BAY_INTERRUPT_MISSED/);
+    const recovered = await physicalTool(device, 'pico_python_run', { code: "print('PICO_BAY_AFTER_INTERRUPT')" });
+    assert.equal(recovered.structuredContent.ok, true);
+    assert.equal(recovered.structuredContent.err.trim(), '');
+    assert.equal(viewer.cleanReplOutput(recovered.structuredContent.out).trim(), 'PICO_BAY_AFTER_INTERRUPT');
+  } finally {
+    try {
+      if (!settled) {
+        // Test cleanup only: recover even when the application's interrupt route is broken.
+        await port.write('\r\x03\x03').catch(() => {});
+        await within(completion, 15000, 'Test program did not stop during cleanup');
+      }
+    } finally { port.monitors.delete(monitor); }
+  }
 }
 }

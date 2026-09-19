@@ -16,6 +16,20 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { execFile, execFileSync, spawn } = require('child_process');
 
+let winSerialHelperPath = null;
+if (process.platform === 'win32') {
+  const csc = ['C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe', 'C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe'].find(fs.existsSync);
+  if (!csc) {
+    console.error('Error: Could not find C# compiler (csc.exe) for native Windows serial communication.');
+    process.exit(1);
+  }
+  winSerialHelperPath = path.join(os.tmpdir(), `pico-bay-combridge-${require('./package.json').version.replaceAll('.', '-')}.exe`);
+  if (!fs.existsSync(winSerialHelperPath)) {
+    const csPath = path.join(__dirname, 'combridge.cs');
+    execFileSync(csc, ['/nologo', '/out:' + winSerialHelperPath, csPath], { stdio: 'ignore' });
+  }
+}
+
 // ── Config ──────────────────────────────────────────────────────────────────
 const VERSION = require('./package.json').version;
 const envEnabled = value => /^(1|true)$/i.test(String(value || '').trim());
@@ -198,6 +212,38 @@ function resetEspLines(fd, mode) {
   });
 }
 
+async function winResetEspLines(winPort, mode) {
+  if (!winPort || !winPort.winPortControl) throw new Error('Serial control pipe is unavailable');
+  const delay = mode.endsWith('-slow') ? 550 : 50;
+  const set = (dtr, rts) => new Promise((resolve, reject) => {
+    const control = winPort.winPortControl;
+    if (!control || control.destroyed) return reject(new Error('Serial control pipe is unavailable'));
+    control.write(`dtr:${dtr ? '1' : '0'}\nrts:${rts ? '1' : '0'}\n`, error => error ? reject(error) : resolve());
+  });
+  if (mode === 'usb-normal') {
+    await set(false, true); await sleep(200);
+    await set(false, false); await sleep(200);
+  } else if (mode === 'normal') {
+    await set(false, true); await sleep(100);
+    await set(false, false);
+  } else if (mode === 'usb-jtag') {
+    await set(false, false); await sleep(100);
+    await set(true, false); await sleep(100);
+    await set(true, true); await sleep(100);
+    await set(false, false);
+  } else if (mode.startsWith('classic')) {
+    await set(false, true); await sleep(100);
+    await set(true, false); await sleep(delay);
+    await set(false, false);
+  } else {
+    await set(false, false);
+    await set(true, true);
+    await set(false, true); await sleep(100);
+    await set(true, false); await sleep(delay);
+    await set(false, false);
+  }
+}
+
 function isRaspberryPi(platform = process.platform, model = null) {
   if (platform !== 'linux') return false;
   if (model === null) {
@@ -249,6 +295,7 @@ class PicoPort {
     this.dev = dev;
     this.deviceIdentity = deviceIdentity(dev);
     this.fd = null;
+    this.winPort = null;
     this.closing = false;
     this.connectionGeneration = 0;
     this.chain = Promise.resolve();
@@ -272,12 +319,53 @@ class PicoPort {
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
   }
 
-  _open() {
-    if (this.fd !== null) return;
+  async _open() {
+    if (this.fd !== null || this.winPort !== null) return;
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
     try {
-      this.fd = fs.openSync(this.dev, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
       this.connectionGeneration++;
+      if (process.platform === 'win32') {
+        const generation = this.connectionGeneration;
+        this.winPortPipeBase = 'picobay_' + crypto.randomBytes(8).toString('hex');
+        this.winPortPipe = '\\\\.\\pipe\\' + this.winPortPipeBase;
+        const srv = require('net').createServer();
+        this.winPortServer = srv;
+        await new Promise((resolve, reject) => {
+          const fail = error => {
+            clearTimeout(timer);
+            if (generation === this.connectionGeneration) {
+              this._disconnected();
+              this._emit('sys', '— board disconnected —\n');
+            }
+            reject(error);
+          };
+          const timer = setTimeout(() => fail(new Error('Serial control pipe timed out')), 5000);
+          srv.on('error', fail);
+          srv.on('connection', control => {
+            control.on('error', fail);
+            if (generation !== this.connectionGeneration) { control.destroy(); return; }
+            this.winPortControl = control;
+            control.on('close', () => fail(new Error('Serial control pipe closed')));
+            clearTimeout(timer);
+            resolve();
+          });
+          try {
+            srv.listen(this.winPortPipe);
+            const child = spawn(winSerialHelperPath, [this.dev.replace(/^\\\\?\\\\.\\/, ''), '115200', this.winPortPipeBase], { stdio: ['pipe', 'pipe', 'inherit'] });
+            this.winPort = child;
+            child.on('error', fail);
+            child.on('exit', () => fail(new Error('Board disconnected: ' + this.dev)));
+            child.stdin.on('error', fail);
+            child.stdout.on('error', fail);
+            child.stdout.on('data', data => {
+              if (generation === this.connectionGeneration) this._onData(data.toString('binary'));
+            });
+          } catch (error) { fail(error); }
+        });
+        return;
+      }
+
+      this.fd = fs.openSync(this.dev, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
       // Return reads after 100 ms instead of blocking indefinitely.
       execFileSync('stty', [STTY_FLAG, this.dev, 'raw', '-echo', '115200', 'min', '0', 'time', '1'], {
         stdio: ['ignore', 'ignore', 'ignore'],
@@ -285,13 +373,31 @@ class PicoPort {
     } catch (error) {
       this._disconnected();
       const failure = new Error('Board disconnected: ' + this.dev);
-      failure.code = error.code;
+      failure.code = error.code || error.message;
       throw failure;
     }
     this._pump();
   }
 
   _close() {
+    if (this.winPortServer) {
+      this.winPortServer.close();
+      this.winPortServer = null;
+    }
+    if (this.winPort !== null) {
+      this.connectionGeneration++;
+      const child = this.winPort;
+      this.winPort = null;
+      if (this.winPortControl) {
+        this.winPortControl.destroy();
+        this.winPortControl = null;
+      }
+      // An exit/error handler may be closing a helper that has already stopped.
+      this.closing = !!child.pid && child.exitCode === null && child.signalCode === null;
+      if (this.closing) child.once('close', () => { this.closing = false; });
+      child.stdin.end();
+      return;
+    }
     if (this.fd === null) return;
     this.connectionGeneration++;
     const fd = this.fd;
@@ -377,6 +483,11 @@ class PicoPort {
 
   // Handle short tty writes.
   _writeAll(buf, off, len) {
+    if (this.winPort !== null) {
+      return new Promise((resolve, reject) => {
+        this.winPort.stdin.write(buf.subarray(off, off + len), error => error ? reject(error) : resolve());
+      });
+    }
     let done = 0;
     while (done < len) {
       if (this.fd === null) throw new Error('port closed');
@@ -387,9 +498,9 @@ class PicoPort {
   // Feed plain raw REPL in small chunks because it lacks flow control.
   async write(data) {
     const buf = Buffer.from(data, 'binary');
-    if (buf.length <= 256) { this._writeAll(buf, 0, buf.length); return; }
+    if (buf.length <= 256) { await this._writeAll(buf, 0, buf.length); return; }
     for (let off = 0; off < buf.length; off += 256) {
-      this._writeAll(buf, off, Math.min(256, buf.length - off));
+      await this._writeAll(buf, off, Math.min(256, buf.length - off));
       await sleep(2);
     }
   }
@@ -425,13 +536,17 @@ class PicoPort {
     let lastErr;
     do {
       try {
-        await this.write('\r' + CTRL_C + CTRL_C);
-        await sleep(30);
+        await this.write('\r' + CTRL_B);
+        await sleep(50);
+        await this.write('\r' + CTRL_C);
+        await sleep(150);
+        await this.write(CTRL_C);
+        await sleep(150);
         this.capture = null;                     // discard the interrupt traceback
         this.rx = '';
         await this.write(CTRL_A);
         // Start reading after a successful write to avoid orphaned timeout promises.
-        await this.readUntil(RAW_BANNER, 400);
+        await this.readUntil(RAW_BANNER, 1500);
         return;
       } catch (e) { lastErr = e; }
     } while (Date.now() < deadline);
@@ -470,7 +585,7 @@ class PicoPort {
         else if (b === '\x04') { await this.write(CTRL_D); return true; }  // board gave up
       }
       const n = Math.min(remain, buf.length - i);
-      this._writeAll(buf, i, n);
+      await this._writeAll(buf, i, n);
       i += n;
       remain -= n;
     }
@@ -497,7 +612,7 @@ class PicoPort {
       // CircuitPython's plain raw REPL needs byte-wise pacing.
       const buf = Buffer.from(code + CTRL_D, 'binary');
       for (let off = 0; off < buf.length; off += 1) {
-        this._writeAll(buf, off, 1);
+        await this._writeAll(buf, off, 1);
         await sleep(1);
       }
     }
@@ -525,7 +640,7 @@ class PicoPort {
       this.inCommand = true;
       try {
         await this._waitForClose();
-        this._open();
+        await this._open();
         if (rawRepl && !this.halted) {
           this.rx = '';
           await this._enterRaw();
@@ -586,7 +701,7 @@ class PicoPort {
 
   async addMonitor(fn) {
     await this._waitForClose();
-    this._open();
+    await this._open();
     this.monitors.add(fn);
   }
   removeMonitor(fn) {
@@ -637,13 +752,28 @@ function parseProbeOutput(out) {
 
 function listDevs(platform = process.platform) {
   if (deviceListOverride) return [...deviceListOverride];
+  if (platform === 'win32') {
+    try {
+      const reg = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'reg.exe') : 'reg';
+      const out = execFileSync(reg, ['query', 'HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const ports = [];
+      for (const line of out.split(/\r?\n/)) {
+        if (/BthModem|Bluetooth/i.test(line)) continue;
+        const match = /\b(COM\d+)\b/i.exec(line);
+        if (match && !ports.includes(match[1])) ports.push(match[1]);
+      }
+      return ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    } catch { return []; }
+  }
   const devMatch = platform === 'darwin'
     ? /^cu\.(usbmodem|usbserial)/
     : /^(ttyACM|ttyUSB)/;
   try {
     return fs.readdirSync(DEV_DIR)
       .filter(n => devMatch.test(n))
-      .map(n => path.join(DEV_DIR, n))
+      .map(n => path.posix.join(DEV_DIR, n))
       .sort();
   } catch { return []; }
 }
@@ -652,7 +782,9 @@ function deviceIdentity(dev) {
   try {
     const stat = fs.statSync(dev);
     return String(stat.ino) + ':' + String(stat.rdev);
-  } catch { return null; }
+  } catch {
+    return process.platform === 'win32' && /^COM\d+$/i.test(dev) ? dev : null;
+  }
 }
 
 function getPort(dev) {
@@ -843,9 +975,13 @@ async function probeRecord(port, key, code, attempts = 4) {
           'If there is no RESET button, reconnect USB while holding BOOT and keep holding for 3 seconds.');
       }
       const resetLoop = /RTCWDT_RTC_RESET|TG0WDT_SYS_RESET|TG1WDT_SYS_RESET/.test(text);
-      throw new Error(resetLoop
-        ? 'Board reports watchdog resets during flash boot and does not respond to MicroPython or the download bootloader.'
-        : 'Board did not respond to MicroPython or the ESP download bootloader. Check its firmware and boot mode, then Scan to retry.');
+      if (resetLoop) {
+        throw new Error('Board reports watchdog resets during flash boot and does not respond to MicroPython or the download bootloader.');
+      }
+      if (lastError && !/timeout|no matching|PVI_IMPL/i.test(lastError.message)) {
+        throw lastError;
+      }
+      throw new Error('Board did not respond to MicroPython or the ESP download bootloader. Check its firmware and boot mode, then Scan to retry.');
     }
   }
   if (lastError) throw lastError;
@@ -888,13 +1024,14 @@ async function probe(dev) {
   if (p.info) return p.info;
   if (p.probePromise) return p.probePromise;
   if (p.probeFailure && Date.now() < p.probeFailure.retryAt) throw p.probeFailure.error;
+  const oldFailure = p.probeFailure;
   p.probeFailure = null;
   const identify = async () => {
     const detected = await probeRecord(
       p,
       'IMPL',
       "import sys;print('PVI_IMPL',getattr(sys.implementation,'name','micropython'))",
-      10,
+      1,
     );
     if (detected === 'esp-bootloader') return p.info;
     let values;
@@ -949,7 +1086,7 @@ async function probe(dev) {
   })();
   try { return await p.probePromise; }
   catch (error) {
-    p.probeFailure = { error, retryAt: Date.now() + 30000 };
+    p.probeFailure = { error, retryAt: oldFailure ? Infinity : Date.now() + 10000 };
     throw error;
   }
   finally { p.probePromise = null; }
@@ -1023,8 +1160,12 @@ async function scanDevices({ waitForProbes = true } = {}) {
       }
       return { ...info, ok: true };
     } catch (e) {
+      let msg = String(e.message || e);
+      if (msg.includes('timed out waiting for the board')) {
+        msg = 'Board is unresponsive (timed out).';
+      }
       return {
-        dev, ok: false, error: String(e.message || e),
+        dev, ok: false, error: msg,
         machine: '', release: '', uid: '',
         label: path.basename(dev).replace(/^cu\./, ''), serial: path.basename(dev).slice(-4),
       };
@@ -1092,7 +1233,7 @@ function pyBytes(buf) {
 function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   const parts = p.replace(/^\/+/, '').split('/').filter(Boolean);
-  if (parts.some(s => s === '.' || s === '..' || /[\x00-\x1f]/.test(s))) return null;
+  if (parts.some(s => s === '.' || s === '..' || /[\\\x00-\x1f]/.test(s))) return null;
   const out = parts.join('/');
   return out.length ? out : null;
 }
@@ -1128,6 +1269,24 @@ let espInstallOverride = null;
 
 function circuitMountCandidates() {
   const found = new Set();
+  if (process.platform === 'win32') {
+    try {
+      const fsutil = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'fsutil.exe') : 'fsutil';
+      const out = execFileSync(fsutil, ['fsinfo', 'drives'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const drives = [...out.matchAll(/([A-Za-z]:\\)/g)].map(m => m[1]);
+      for (const drive of drives) {
+        if (drive.toUpperCase().startsWith('C:')) continue;
+        try {
+          if (fs.existsSync(path.join(drive, 'boot_out.txt'))) {
+            found.add(drive);
+          }
+        } catch {}
+      }
+    } catch {}
+    return [...found];
+  }
   const bases = process.platform === 'darwin'
     ? ['/Volumes']
     : ['/media', '/run/media', '/mnt'];
@@ -1237,6 +1396,31 @@ function parseDarwinBootselVolumes(output) {
 let bootselDiscoveryError = '';
 async function bootselDevices() {
   if (bootselDeviceOverride) return bootselDeviceOverride;
+  if (process.platform === 'win32') {
+    try {
+      const fsutil = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'fsutil.exe') : 'fsutil';
+      const out = await execFileText(fsutil, ['fsinfo', 'drives'], { timeout: 2000 });
+      const drives = [...out.matchAll(/([A-Za-z]:\\)/g)].map(m => m[1]);
+      const devices = [];
+      for (const drive of drives) {
+        if (drive.toUpperCase().startsWith('C:')) continue;
+        try {
+          const info = await execFileText(fsutil, ['fsinfo', 'volumeinfo', drive.slice(0, 2)], { timeout: 2000 });
+          const m = /^Volume Name\s*:\s*(RPI-RP2|RP2350)/im.exec(info);
+          if (m) {
+            const chip = m[1].toUpperCase() === 'RPI-RP2' ? 'RP2040' : 'RP2350';
+            devices.push({
+              dev: 'bootsel:' + drive, ok: true, bootMode: true,
+              firmware: 'bootsel', firmwareLabel: 'BOOTSEL', machine: chip, release: '', uid: '',
+              label: chip, serial: '', readOnly: true, blockDevice: drive, mountRoot: drive,
+              capabilities: { read: false, write: false, run: false, console: false },
+            });
+          }
+        } catch {}
+      }
+      return devices;
+    } catch { return []; }
+  }
   if (process.platform === 'linux') {
     try {
       const output = await linuxBlockDevices();
@@ -1514,10 +1698,15 @@ async function flashEspImage(port, device, firmware, image, onProgress = () => {
 async function rebootEspAfterInstall(port, device, resetLines = resetEspLines) {
   const nativeUsb = espResetStrategies(device, port.dev)[0] === 'usb-jtag';
   let rebooted = false;
-  if (process.platform !== 'win32' && port.fd !== null) {
+  if (process.platform === 'win32' && port.winPort && resetLines === resetEspLines) {
+    try {
+      await winResetEspLines(port, nativeUsb ? 'usb-normal' : 'normal');
+      rebooted = true;
+    } catch {}
+  } else if (port.fd !== null || (process.platform === 'win32' && resetLines !== resetEspLines)) {
     try {
       // A hard reset restarts peripherals; a ROM jump into the application does not.
-      await resetLines(port.fd, nativeUsb ? 'usb-normal' : 'normal');
+      await resetLines(port.fd || port.winPort, nativeUsb ? 'usb-normal' : 'normal');
       rebooted = true;
     } catch { /* Optional control-line support: fall back to the ROM command. */ }
   }
@@ -1763,11 +1952,15 @@ function mountedRootWritable(root) {
   } catch { return false; }
 }
 
-function mountedPath(root, devicePath) {
+function mountedPath(root, devicePath, pathApi = path) {
   const clean = cleanPath(devicePath);
   if (!clean) return null;
-  const target = path.resolve(root, ...clean.split('/'));
-  return target.startsWith(path.resolve(root) + path.sep) ? target : null;
+  // Windows normalizes trailing dots/spaces and interprets colons as drive/stream syntax.
+  if (pathApi.sep === '\\' && clean.split('/').some(part => /:|[. ]$/.test(part))) return null;
+  const resolvedRoot = pathApi.resolve(root);
+  const target = pathApi.resolve(root, ...clean.split('/'));
+  const prefix = resolvedRoot.endsWith(pathApi.sep) ? resolvedRoot : resolvedRoot + pathApi.sep;
+  return target !== resolvedRoot && target.startsWith(prefix) ? target : null;
 }
 
 function listMountedFiles(root, includeSystemFiles = false) {
@@ -1928,7 +2121,8 @@ async function writeFile(dev, file, buf) {
   if (access.mode === 'mount') {
     const local = mountedPath(access.root, file);
     if (!local) throw new Error('Bad path');
-    fs.mkdirSync(path.dirname(local), { recursive: true });
+    const parent = path.dirname(local);
+    if (!fs.existsSync(parent)) fs.mkdirSync(parent, { recursive: true });
     fs.writeFileSync(local, buf);
     return { ok: true, size: buf.length };
   }
@@ -2030,9 +2224,9 @@ function bootloaderMode(info) {
 
 function espResetStrategies(info, dev) {
   const serial = ['tight', 'tight-slow', 'classic', 'classic-slow'];
-  // Native USB commonly appears as usbmodem/ttyACM. Keep the UART fallback
-  // for boards that use a CDC bridge with the same naming convention.
-  return /ESP32-?[CS]3/i.test(info.machine || '') && /(?:usbmodem|ttyACM)/i.test(dev)
+  // Windows COM names do not distinguish native USB from UART bridges.
+  // Try native USB on C3/S3 COM ports, retaining the UART fallbacks.
+  return /ESP32-?[CS]3/i.test(info.machine || '') && /(?:usbmodem|ttyACM|^COM\d+$)/i.test(dev)
     ? ['usb-jtag', ...serial] : serial;
 }
 
@@ -2041,12 +2235,10 @@ async function enterBootloader(dev) {
   const mode = bootloaderMode(info);
   if (!mode) throw new Error('Firmware install mode is unavailable for this board');
   if (mode === 'download') {
-    if (process.platform === 'win32') {
-      return { ok: false, manual: true, reason: 'Automatic DTR/RTS control is unavailable on Windows' };
-    }
     const port = getPort(dev);
     return port.command(async active => {
-      const reset = mode => resetEspLines(active.fd, mode);
+      const reset = mode => process.platform === 'win32' && active.winPort ?
+        winResetEspLines(active, mode) : resetEspLines(active.fd, mode);
       // Reset invalidates the raw REPL halt state; cleanup must not soft-reset
       // a newly entered ROM loader.
       active.halted = false;
@@ -2098,10 +2290,26 @@ async function makeDirectory(dev, file) {
   if (access.mode === 'mount') {
     const local = mountedPath(access.root, file);
     if (!local) throw new Error('Bad path');
-    fs.mkdirSync(local);
-    return { ok: true, out: '' };
+    fs.mkdirSync(local, { recursive: true });
+    return { ok: true };
   }
-  return simpleOp(dev, 'import os\nos.mkdir(' + pyStr(file) + ')');
+  const p = getPort(dev);
+  return p.command(async (port) => {
+    const { err } = await port.exec([
+      'import os',
+      'p = ' + pyStr(file),
+      "acc = ''",
+      "for part in p.split('/'):",
+      "    acc = acc + '/' + part if acc else part",
+      '    try:',
+      '        os.mkdir(acc)',
+      '    except OSError as e:',
+      '        if e.args[0] != 17:',
+      '            raise',
+    ].join('\n'));
+    if (err.trim()) throw new Error(pyError(err));
+    return { ok: true };
+  });
 }
 
 async function renamePath(dev, from, to) {
@@ -2173,7 +2381,7 @@ async function runPython(dev, options = {}) {
 
 async function interruptBoard(dev) {
   const port = getPort(dev);
-  if (port.fd !== null) await port.write('\r' + CTRL_C + CTRL_C);
+  if (port.fd !== null || port.winPort) await port.write('\r' + CTRL_C + CTRL_C);
   port._emit('sys', '— interrupt sent —\n');
   return { ok: true };
 }
@@ -3471,7 +3679,16 @@ function openBrowser(url) {
 }
 
 function findPortOwner(port) {
-  if (process.platform === 'win32') return null;
+  if (process.platform === 'win32') {
+    try {
+      const netstat = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'netstat.exe') : 'netstat';
+      const output = execFileSync(netstat, ['-ano', '-p', 'tcp'], {
+        encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const match = new RegExp(`:${port}\\s+.*LISTENING\\s+(\\d+)`, 'i').exec(output);
+      return match ? { pid: match[1], command: 'process' } : null;
+    } catch { return null; }
+  }
   try {
     const output = execFileSync('lsof', [
       '-nP', '-iTCP:' + port, '-sTCP:LISTEN', '-Fpct',
@@ -3641,6 +3858,8 @@ module.exports = {
   handleMcpHttp,
   writeFile,
   _test: {
+    mountedPath,
+    winResetEspLines,
     resetEspLines,
     initializeEspFlashStorage,
     clearDevices() {
