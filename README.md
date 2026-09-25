@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
-[![Version 0.9.27](https://img.shields.io/badge/version-0.9.27-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.28](https://img.shields.io/badge/version-0.9.28-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
@@ -108,7 +108,7 @@ Call `pico_boards_list` first, then pass its `board_id` to board-specific tools.
 
 ## Installing MicroPython in BOOTSEL mode
 
-On a Pico running MicroPython or CircuitPython, select **Enter BOOTSEL mode** from the top-right menu and confirm. To enter manually, disconnect the board, hold its **BOOTSEL** button, and reconnect USB while continuing to hold it. Keep holding for 3 seconds, then release. pico-bay shows the RP2040 or RP2350 boot device as a red pill. Select it and choose if this is a W model (with Wi-Fi) or not, as it is not autodetectable. To cancel before installing firmware, unplug USB and plug it back in without holding any buttons.
+On a Pico running MicroPython or CircuitPython, select **Reboot to BOOTSEL** from the top-right menu and confirm. To enter manually, disconnect the board, hold its **BOOTSEL** button, and reconnect USB while continuing to hold it. Keep holding for 3 seconds, then release. pico-bay shows the RP2040 or RP2350 boot device as a red pill. Select it and choose if this is a W model (with Wi-Fi) or not, as it is not autodetectable. To cancel before installing firmware, unplug USB and plug it back in without holding any buttons.
 
 pico-bay confirms the operation, downloads the latest matching MicroPython UF2 from [micropython.org](https://micropython.org/download/), validates it, and copies it to the boot volume. The screen reports the download, validation, installation, and reboot stages. Keep the board connected during installation. It reboots automatically and then appears as a normal MicroPython device.
 

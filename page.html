@@ -473,6 +473,7 @@
     <div id="menu">
       <button class="requires-write" onclick="pickUpload()">Upload files…</button>
       <button class="requires-write" onclick="pickUploadFolder()">Upload folder…</button>
+      <button class="requires-write" id="ctrlpi-install-btn" style="color: #0969da; display: none;" onclick="openCtrlPiDialog()">Install ctrlPi API</button>
       <hr>
       <button class="requires-write" onclick="newFile()">New file…</button>
       <button class="requires-write" onclick="newFolder()">New folder…</button>
@@ -501,7 +502,7 @@
       <button class="requires-device" onclick="doReset(true)">Hard reset (reconnect)</button>
       <hr>
       <button class="danger requires-write" onclick="doClean()">Delete all files…</button>
-      <button class="danger requires-device" id="bootloader-btn" onclick="doBootloader()" hidden>Enter BOOTSEL mode</button>
+      <button class="danger requires-device" id="bootloader-btn" onclick="doBootloader()" hidden>Reboot to BOOTSEL</button>
       <button class="danger" id="reset-pi-usb-btn" onclick="showPiUsbPowerHelp()" hidden>Toggle Pi USB Power</button>
       <hr>
       <button onclick="showReadme()">README.md</button>
@@ -633,6 +634,41 @@
       <span id="dialog-footer"></span>
       <button class="btn" type="button" id="dialog-cancel">Cancel</button>
       <button class="btn primary" type="submit" id="dialog-confirm">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ctrlpi-dialog">
+  <style>
+    #ctrlpi-dialog { width: min(420px, calc(100vw - 32px)); margin: auto; border: 1px solid #d0d7de; border-radius: 10px; background: #fff; box-shadow: 0 16px 48px rgba(31,35,40,0.25); padding: 0; color: #1f2328; }
+    #ctrlpi-dialog::backdrop { background: rgba(31,35,40,0.38); }
+    #ctrlpi-dialog input { width: 100%; padding: 7px 10px; border: 1px solid #d0d7de; border-radius: 6px; font: inherit; font-size: 13px; outline: none; box-sizing: border-box; }
+    #ctrlpi-dialog input:focus { border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,0.2); }
+    #ctrlpi-dialog label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .ctrlpi-field { margin-bottom: 12px; }
+  </style>
+  <form id="ctrlpi-form" style="padding: 20px;">
+    <h2 style="font-size: 16px; margin-bottom: 8px;">Install ctrlPi API</h2>
+    <div style="color: #57606a; font-size: 13px; margin-bottom: 16px;">Fill in the details below to install ctrlPi API on this board.</div>
+    <div class="ctrlpi-field">
+      <label>API Key</label>
+      <input id="ctrlpi-key" autocomplete="off" required>
+    </div>
+    <div class="ctrlpi-field">
+      <label>Agent Name (optional)</label>
+      <input id="ctrlpi-name" autocomplete="off" placeholder="Defaults to pico-<serial4>">
+    </div>
+    <div class="ctrlpi-field">
+      <label>WiFi SSID</label>
+      <input id="ctrlpi-ssid" autocomplete="off" required>
+    </div>
+    <div class="ctrlpi-field" style="margin-bottom: 20px;">
+      <label>WiFi Password</label>
+      <input id="ctrlpi-pass" type="password" autocomplete="off" required>
+    </div>
+    <div style="display: flex; justify-content: flex-end; gap: 8px;">
+      <button class="btn" type="button" onclick="document.getElementById('ctrlpi-dialog').close()">Cancel</button>
+      <button class="btn primary" type="submit" id="ctrlpi-submit">Install</button>
     </div>
   </form>
 </dialog>
@@ -1147,10 +1183,16 @@
     bootloaderButton.disabled = !canEnterBootloader || bootloaderPending;
     if (canEnterBootloader) {
       bootloaderButton.textContent = device.bootloaderMode === 'download'
-        ? 'Enter download mode…' : 'Enter BOOTSEL mode';
+        ? 'Enter download mode…' : 'Reboot to BOOTSEL';
     }
     conIn.disabled = !on || !canUseConsole();
     conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
+
+    var ctrlPiBtn = document.getElementById('ctrlpi-install-btn');
+    if (ctrlPiBtn) {
+      var isPicoW = device && device.machine && (device.machine.toLowerCase().includes('pico w') || device.machine.toLowerCase().includes('pico 2 w'));
+      ctrlPiBtn.style.display = (on && isPicoW) ? 'block' : 'none';
+    }
   }
 
   async function selectDev(dev) {
@@ -2636,6 +2678,77 @@
   showWelcome();
   refreshDevices();
   setInterval(loadDevices, 3000);   // hot-plug: pills appear and vanish on their own
+  async function openCtrlPiDialog() {
+    closeMenu();
+    if (!curDev) return;
+    
+    var keyInput = document.getElementById('ctrlpi-key');
+    var nameInput = document.getElementById('ctrlpi-name');
+    var ssidInput = document.getElementById('ctrlpi-ssid');
+    var passInput = document.getElementById('ctrlpi-pass');
+    
+    keyInput.value = 'your-secret-key';
+    nameInput.value = '';
+    ssidInput.value = '';
+    passInput.value = '';
+
+    var hasConfig = allFiles.some(function(f) { return f.path === '/config.json' || f.path === 'config.json'; });
+    if (hasConfig) {
+      try {
+        var configData = await api('/api/file?path=config.json');
+        if (configData && configData.text) {
+          var conf = JSON.parse(configData.text);
+          if (conf.api_key) keyInput.value = conf.api_key;
+          if (conf.name) nameInput.value = conf.name;
+        }
+      } catch (e) {}
+    }
+    
+    var hasWifi = allFiles.some(function(f) { return f.path === '/wifi.txt' || f.path === 'wifi.txt'; });
+    if (hasWifi) {
+      try {
+        var wifiData = await api('/api/file?path=wifi.txt');
+        if (wifiData && wifiData.text) {
+          var lines = wifiData.text.split('\n');
+          for (var i = 0; i < lines.length; i++) {
+            var match = lines[i].match(/^([^=]+)=(.*)$/);
+            if (match) {
+              var k = match[1].trim().toUpperCase();
+              var v = match[2].trim();
+              if (k === 'SSID') ssidInput.value = v;
+              if (k === 'PASSWORD') passInput.value = v;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    document.getElementById('ctrlpi-dialog').showModal();
+  }
+
+  document.getElementById('ctrlpi-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    document.getElementById('ctrlpi-dialog').close();
+    
+    var key = document.getElementById('ctrlpi-key').value.trim();
+    var name = document.getElementById('ctrlpi-name').value.trim();
+    var ssid = document.getElementById('ctrlpi-ssid').value.trim();
+    var pass = document.getElementById('ctrlpi-pass').value.trim();
+    
+    toast('Installing ctrlPi API on the board...', false, 15000);
+    
+    try {
+      await api('/api/ctrlpi/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key, name: name, ssid: ssid, pass: pass })
+      });
+      toast('ctrlPi API installed successfully. Board is resetting.', false, 3000, true);
+      loadFiles();
+    } catch (e) {
+      toast('Installation failed: ' + e.message, true);
+    }
+  });
 </script>
 </body>
 </html>

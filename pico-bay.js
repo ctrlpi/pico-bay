@@ -3647,6 +3647,39 @@ function createServer(options = {}) {
       return;
     }
 
+    if (p === '/api/ctrlpi/install' && req.method === 'POST') {
+      await requireWritable(dev);
+      const body = JSON.parse(await readBody(req));
+      
+      const configJson = `{\n  "api_key": "${body.key}",\n  "name": "${body.name || ''}"\n}`;
+      const wifiTxt = `SSID = ${body.ssid}\nPASSWORD = ${body.pass}\n`;
+      const cpuTempScript = `# CPU temperature in degrees Celsius, as a bare number (e.g. 23.4), not JSON.
+# Use it as a sensor: POST /sensor/config/cpu_temp {"script": "cpu-temp.py"}
+import machine
+
+def read():
+    v = machine.ADC(4).read_u16() * 3.3 / 65535
+    return round(27 - (v - 0.706) / 0.001721, 1)
+`;
+
+      const response = await fetch('https://npm.ctrlpi.com/ctrlpi/pico-gpio-api/main.py');
+      if (!response.ok) throw new Error('Failed to download main.py from server (HTTP ' + response.status + ')');
+      const mainPy = await response.text();
+
+      await writeFile(dev, 'main.py', Buffer.from(mainPy));
+      await writeFile(dev, 'config.json', Buffer.from(configJson));
+      await writeFile(dev, 'wifi.txt', Buffer.from(wifiTxt));
+      
+      try {
+        await mkdir(dev, 'scripts');
+      } catch(e) {}
+      await writeFile(dev, 'scripts/cpu-temp.py', Buffer.from(cpuTempScript));
+      
+      await resetBoard(dev, false);
+      sendJSON(res, 200, { ok: true });
+      return;
+    }
+
     if (p === '/api/reset' && req.method === 'POST') {
       sendJSON(res, 200, await resetBoard(dev, q.hard === '1'));
       return;
