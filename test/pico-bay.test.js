@@ -1,70 +1,3 @@
-'use strict';
-
-const { spec } = require('node:test/reporters');
-const { Readable } = require('node:stream');
-
-function formatMilliseconds(value) {
-  const milliseconds = Number(value);
-  if (!Number.isFinite(milliseconds)) return String(value);
-  if (milliseconds >= 1) return String(Math.round(milliseconds));
-  if (milliseconds <= 0) return '0';
-  return milliseconds.toPrecision(1);
-}
-
-function formatReporterLine(line, color) {
-  line = line
-    .replace(/(\()([0-9]+(?:\.[0-9]+)?)ms\)/g,
-      (_match, opening, value) => opening + formatMilliseconds(value) + 'ms)')
-    .replace(/(duration_ms\s+)([0-9]+(?:\.[0-9]+)?)/g,
-      (_match, _label, value) => 'duration ' + formatMilliseconds(value) + ' ms');
-  const plain = line.replace(/\x1b\[[0-9;]*m/g, '');
-  const paint = (text, code) => color ? `\x1b[${code}m${text}\x1b[0m` : text;
-  if (plain === '*** Optional physical boards tests') return paint(plain, '1;34');
-  const noBoards = ' # no serial boards connected';
-  if (plain.includes(noBoards)) {
-    const indent = plain.match(/^\s*/)[0];
-    return plain.slice(0, plain.indexOf(noBoards)) + '\n' +
-      paint(indent + '*** no serial boards connected', '38;5;208');
-  }
-  const summary = plain.match(/^ℹ (tests|suites|pass|fail|cancelled|skipped|todo|duration)\s+(\d+)/);
-  if (summary) {
-    const [, label, count] = summary;
-    const code = label === 'skipped' && Number(count) > 0 ? '38;5;208'
-      : ['fail', 'cancelled'].includes(label) && Number(count) > 0 ? '31' : '32';
-    return paint(plain, code);
-  }
-  if (/^\s*✔ .* on \/dev\//.test(plain)) return paint(plain, '38;5;28');
-  return line;
-}
-
-if (require.main !== module) {
-  module.exports = async function* roundedSpecReporter(source) {
-    const reporter = spec();
-    const color = process.env.FORCE_COLOR !== undefined
-      ? process.env.FORCE_COLOR !== '0'
-      : !('NO_COLOR' in process.env) && !!process.stdout.isTTY;
-    async function* withPhysicalHeading() {
-      for await (const event of source) {
-        if (event.type === 'test:dequeue' && event.data.nesting === 0 &&
-            event.data.name === 'optional physical boards') {
-          yield { type: 'test:stdout', data: { message: '*** Optional physical boards tests\n' } };
-        }
-        yield event;
-      }
-    }
-    Readable.from(withPhysicalHeading()).pipe(reporter);
-    let pending = '';
-    for await (const chunk of reporter) {
-      pending += String(chunk);
-      let newline;
-      while ((newline = pending.indexOf('\n')) !== -1) {
-        yield formatReporterLine(pending.slice(0, newline), color) + '\n';
-        pending = pending.slice(newline + 1);
-      }
-    }
-    if (pending) yield formatReporterLine(pending, color);
-  };
-} else {
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -72,8 +5,10 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { after, before, describe, test } = require('node:test');
 const zlib = require('node:zlib');
+const { formatMilliseconds } = require('./reporter.js');
 
-const viewer = require('./pico-bay.js');
+const PROJECT_DIR = path.resolve(__dirname, '..');
+const viewer = require('../pico-bay.js');
 
 function makeZipEntry(name, content, deflate = false) {
   const nameBuf = Buffer.from(name);
@@ -689,17 +624,17 @@ describe('ESP ROM detection', () => {
 describe('pure helpers', () => {
   test('prints CLI help and version without starting the server', () => {
     const help = spawnSync(process.execPath, ['pico-bay.js', '--help'], {
-      cwd: __dirname, encoding: 'utf8',
+      cwd: PROJECT_DIR, encoding: 'utf8',
     });
     assert.equal(help.status, 0);
     assert.match(help.stdout, /^Usage: pico-bay \[options\]/);
     assert.equal(help.stderr, '');
 
     const version = spawnSync(process.execPath, ['pico-bay.js', '--version'], {
-      cwd: __dirname, encoding: 'utf8',
+      cwd: PROJECT_DIR, encoding: 'utf8',
     });
     assert.equal(version.status, 0);
-    assert.equal(version.stdout.trim(), require('./package.json').version);
+    assert.equal(version.stdout.trim(), require('../package.json').version);
     assert.equal(version.stderr, '');
   });
 
@@ -908,7 +843,7 @@ describe('pure helpers', () => {
   });
 
   test('BOOTSEL feedback accepts any detected BOOTSEL board', async () => {
-    const html = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8');
+    const html = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
     const start = html.indexOf('  async function waitForBootsel(');
     const end = html.indexOf('  async function doBootloader()', start);
     let scans = 0;
@@ -1929,6 +1864,7 @@ describe('Windows serial lifecycle', () => {
     const { EventEmitter } = require('node:events');
     const children = [], servers = [];
     const fakeRequire = name => {
+      if (name === './package.json') return require('../package.json');
       if (name === 'fs') return { ...fs, existsSync: file => String(file).endsWith('.exe') || fs.existsSync(file) };
       if (name === 'net') return { createServer() {
         const server = new EventEmitter();
@@ -1951,11 +1887,11 @@ describe('Windows serial lifecycle', () => {
       return require(name);
     };
     const context = {
-      require: fakeRequire, module: { exports: {} }, __dirname, Buffer, console,
+      require: fakeRequire, module: { exports: {} }, __dirname: PROJECT_DIR, Buffer, console,
       process: { ...process, platform: 'win32', env: { ...process.env } },
       setTimeout, clearTimeout, setInterval, clearInterval, URL,
     };
-    require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, 'pico-bay.js'), 'utf8'), context);
+    require('node:vm').runInNewContext(fs.readFileSync(path.join(PROJECT_DIR, 'pico-bay.js'), 'utf8'), context);
     const api = context.module.exports;
     const port = api.getPort('COM7');
     t.after(() => { for (const child of children) child.stop(); port._close(); });
@@ -2160,7 +2096,7 @@ describe('console serial lifecycle', () => {
 describe('MCP stdio process', () => {
   test('writes only JSON-RPC messages to stdout', async () => {
     const child = spawn(process.execPath, ['pico-bay.js', '--mcp-stdio'], {
-      cwd: __dirname,
+      cwd: PROJECT_DIR,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -2189,6 +2125,10 @@ describe('MCP stdio process', () => {
 describe('optional physical boards', () => {
   test('runs firmware-appropriate checks when boards are connected', async t => {
     viewer._test.clearDevices();
+    if (process.env.CI) {
+      t.skip('physical boards are not available in CI');
+      return;
+    }
     const devices = await viewer.scanDevices();
     if (!devices.length) {
       t.skip('no serial boards connected');
@@ -2404,5 +2344,4 @@ async function testPhysicalInterrupt(device) {
       }
     } finally { port.monitors.delete(monitor); }
   }
-}
 }

@@ -1,6 +1,6 @@
 {
   "name": "@ctrlpi/pico-bay",
-  "version": "0.9.28",
+  "version": "0.9.29",
   "description": "An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB.",
   "keywords": [
     "raspberry-pi-pico",
@@ -42,13 +42,13 @@
     "combridge.cs",
     "page.html",
     "README.md",
-    "test.js",
+    "test",
     "LICENSE"
   ],
   "scripts": {
     "start": "node pico-bay.js",
     "dev": "node --watch --watch-path=pico-bay.js --watch-path=page.html pico-bay.js --no-open",
-    "test": "node --test --test-reporter=./test.js test.js"
+    "test": "node --test --test-reporter=./test/reporter.js test/pico-bay.test.js"
   },
   "engines": {
     "node": ">=20"

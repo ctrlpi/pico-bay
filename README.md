@@ -1,10 +1,12 @@
 # Pico Bay
 
+[![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
+[![Version 0.9.29](https://img.shields.io/badge/version-0.9.29-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
-[![Version 0.9.28](https://img.shields.io/badge/version-0.9.28-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-188038.svg)](LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
+[![Build Status](https://github.com/ctrlpi/pico-bay/actions/workflows/ci.yml/badge.svg)](https://github.com/ctrlpi/pico-bay/actions)
 
 `pico-bay` is an **App** and **MCP Server** for managing Raspberry Pi Pico and ESP32 boards with MicroPython and CircuitPython over USB. It runs with Node.js built-in modules and needs no browser extension or runtime npm dependencies.
 
@@ -300,4 +302,4 @@ npm test
 
 ## License
 
-[MIT](LICENSE)
+[MIT](http://localhost:8181/LICENSE)

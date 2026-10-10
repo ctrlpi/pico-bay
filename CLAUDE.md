@@ -1,4 +1,4 @@
-# CLAUDE.md
+# CLAUDE.md - pico-bay
 
 This file provides guidance to Claude Code when working in this repository.
 
