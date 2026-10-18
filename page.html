@@ -4,7 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pico Bay</title>
+<script>
+  // Apply the saved (or system) dark theme before the page paints, to avoid a flash.
+  (function () {
+    try {
+      var saved = localStorage.getItem('ctrlpi-theme') || localStorage.getItem('theme');
+      if (saved === 'dark' || (!saved && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark-mode');
+      }
+    } catch (e) {}
+  })();
+</script>
 <style>
+  /* Base: GitHub-like colours, system font, full-height column layout. */
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
@@ -28,7 +40,10 @@
     border-bottom: 1px solid #d0d7de;
     padding: 8px 16px;
   }
+  /* The brand doubles as the link back to the welcome screen. */
   #topbar .brand { font-weight: 600; font-size: 14px; color: #1f2328; margin-right: 4px; white-space: nowrap; text-decoration: none; }
+  /* Board pills: blue for MicroPython, orange for CircuitPython, red for install mode
+     or a board that failed to identify. */
   #pills { display: inline-flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   #pills .no-board { font-size: 11px; line-height: 21px; color: #656d76; transform: translateY(1px); }
   .pill {
@@ -38,6 +53,7 @@
     border-radius: 999px; padding: 4px 12px; cursor: pointer; line-height: 18px;
     white-space: nowrap;
   }
+  /* Hover, the selected board, firmware colours, install mode and failures. */
   .pill:hover { background: #f3f4f6; border-color: rgba(31,35,40,0.3); }
   .pill.active { background: #ddf4ff; border-color: #54aeff; color: #0969da; }
   .pill.micropython { border-color: rgba(9,105,218,0.4); }
@@ -46,10 +62,12 @@
   .pill.circuitpython .pico-icon { color: #bc4c00; }
   .pill.bootsel { color: #cf222e; background: #ffebe9; border-color: rgba(207,34,46,0.5); }
   .pill.bad { color: #cf222e; border-color: rgba(207,34,46,0.4); }
+  /* The serial or mode label and the RO marker inside a pill. */
   .pill .serial { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                   font-size: 11px; color: #57606a; }
   .pill .readonly { font-size: 9px; color: #8250df; text-transform: uppercase; letter-spacing: .03em; }
   .pill.active .serial { color: #0969da; }
+  /* The chip icon. */
   .pill .pico-icon {
     width: 15px; height: 15px; flex: 0 0 auto; color: #656d76;
     position: relative; top: -1px;
@@ -58,9 +76,11 @@
   }
   .pill.bad .pico-icon, .pill.bootsel .pico-icon { color: #cf222e; }
 
+  /* Storage usage bars in the top bar. */
   #spacer { flex: 1; }
   #storage { font-size: 11px; color: #57606a; white-space: nowrap; display: none; }
   #storage.visible { display: block; }
+  /* A usage bar: grey track, blue fill. */
   #storage .bar {
     display: inline-block; width: 54px; height: 6px; border-radius: 3px;
     background: #d0d7de; overflow: hidden; vertical-align: middle; margin: 0 5px;
@@ -69,6 +89,7 @@
   #storage .bar:hover { box-shadow: 0 0 0 2px #ddf4ff; }
   #storage .bar i { display: block; height: 100%; background: #0969da; }
 
+  /* The status banner: red for a lost server, yellow for a mount warning. */
   #connection-status {
     position: relative;
     display: none;
@@ -82,8 +103,10 @@
     text-align: center;
   }
   #connection-status.visible { display: block; }
+  /* Yellow for the mount warning. */
   #connection-status.mount-warning { color: #7d4e00; background: #fff8c5; border-bottom-color: #d4a72c; }
   #connection-status code { padding: 1px 4px; border-radius: 4px; background: rgba(207,34,46,0.1); }
+  /* Dismiss button, shown for warnings only. */
   #connection-status-close {
     display: none; position: absolute; top: 50%; right: 12px; transform: translateY(-50%);
     padding: 2px 6px; border: 0; border-radius: 4px; cursor: pointer;
@@ -92,17 +115,21 @@
   #connection-status-close:hover { background: rgba(207,34,46,0.12); }
   #connection-status.mount-warning #connection-status-close { color: #7d4e00; }
 
+  /* Buttons: default, icon-only, the spinning Scan button, primary and danger. */
   .btn {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; font-weight: 500; color: #24292f; line-height: 18px;
     background: #fff; border: 1px solid rgba(31,35,40,0.15);
     border-radius: 6px; padding: 4px 10px; cursor: pointer; flex-shrink: 0;
   }
+  /* Button states. */
   .btn:hover:not(:disabled) { background: #f3f4f6; border-color: rgba(31,35,40,0.3); }
   .btn:active:not(:disabled) { background: #eaeef2; transform: translateY(1px); }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  /* Square icon-only buttons. */
   .btn.icon { width: 28px; height: 28px; padding: 0; justify-content: center; }
   .btn.icon svg { pointer-events: none; }
+  /* Scan spins while a scan runs. */
   #refresh-btn { background: transparent; border-color: transparent; }
   #refresh-btn:hover:not(:disabled) { background: transparent; border-color: transparent; color: #0969da; }
   #refresh-btn.refreshing { background: transparent; border-color: transparent; color: #0969da; opacity: 1; }
@@ -115,6 +142,7 @@
   .file.drop-target { background: #ddf4ff; outline: 2px dashed #0969da; }
 
   /* ── Menu & Dropdowns ── */
+  /* The "More actions" and "Move to" dropdown menus. */
   #menuwrap, #movewrap { position: relative; }
   #menu, .dropdown-menu {
     display: none; position: absolute; right: 0; top: 30px; z-index: 30;
@@ -144,6 +172,7 @@
   #menu .menu-toggle:not(.showing) .menu-off { opacity: 0; }
   #menu hr, .dropdown-menu hr { border: 0; border-top: 1px solid #d0d7de; margin: 4px 0; }
 
+  /* The shared modal dialog. */
   #app-dialog {
     width: min(420px, calc(100vw - 32px));
     margin: auto;
@@ -155,6 +184,7 @@
     padding: 0;
   }
   #app-dialog::backdrop { background: rgba(31,35,40,0.38); }
+  /* Dialog parts: title, message, input, actions and footer. */
   #dialog-form { padding: 20px; }
   #dialog-title { font-size: 16px; line-height: 1.3; margin-bottom: 8px; }
   #dialog-message { color: #57606a; font-size: 13px; white-space: pre-line; }
@@ -170,10 +200,12 @@
   #dialog-footer { margin-right: auto; color: #57606a; font-size: 12px; }
   #dialog-footer a { color: #0969da; text-decoration: none; }
   #dialog-footer a:hover { text-decoration: underline; }
+  /* A destructive confirm button is red. */
   #dialog-confirm.dialog-danger { background: #cf222e; border-color: #cf222e; color: #fff; }
   #dialog-confirm.dialog-danger:hover { background: #a40e26; }
 
   /* ── Layout ── */
+  /* Sidebar (file tree) and right pane, split by a draggable bar. */
   #main { flex: 1; display: flex; min-height: 0; }
 
   #sidebar {
@@ -184,6 +216,7 @@
     min-height: 0;
     background: #fff;
   }
+  /* The sidebar resize handle. */
   #dragbar {
     flex: 0 0 5px;
     cursor: col-resize;
@@ -191,12 +224,14 @@
     border-left: 1px solid #d0d7de;
   }
   #dragbar:hover, #dragbar.dragging { background: #0969da; }
+  /* Install and welcome screens use the whole width. */
   #main.bootsel-mode #sidebar, #main.bootsel-mode #dragbar, #main.bootsel-mode #console { display: none; }
   #main.bootsel-mode #placeholder { justify-content: flex-start; padding-top: 48px; box-sizing: border-box; }
   #main.welcome-mode #placeholder { justify-content: flex-start; padding: 64px 24px 40px; text-align: center; }
   #main.welcome-mode #placeholder > svg { display: none; }
   #main.welcome-mode #ph-title { font-size: 30px; color: #24292f; margin: 0 0 16px; }
   #main.welcome-mode #ph-sub { max-width: 600px; font-size: 16px; line-height: 1.7; }
+  /* The welcome screen's text. */
   .welcome-content { display: none; max-width: 600px; line-height: 1.7; }
   #main.welcome-mode .welcome-content { display: block; }
   #placeholder .welcome-content p { margin: 24px 0; font-size: 15px; font-weight: 400; }
@@ -204,15 +239,19 @@
   .welcome-content .welcome-heading { color: #1f883d; }
   .welcome-content .btn { margin: 0 5px; }
 
+  /* File search box. */
   #search-wrap { padding: 10px; border-bottom: 1px solid #d0d7de; display: flex; gap: 6px; }
+  /* The filter input. */
   #search {
     flex: 1; min-width: 0; font-size: 13px; padding: 6px 10px;
     border: 1px solid #d0d7de; border-radius: 6px; outline: none;
   }
   #search:focus { border-color: #0969da; box-shadow: 0 0 0 2px rgba(9,105,218,0.2); }
 
+  /* The file tree, with the drop-to-upload hint. */
   #filelist { flex: 1; overflow-y: auto; }
   #filelist.dropping { background: #ddf4ff; outline: 2px dashed #54aeff; outline-offset: -6px; }
+  /* The drop hint under the file list. */
   #upload-hint {
     padding: 8px 12px;
     border-top: 1px solid #d0d7de;
@@ -221,6 +260,7 @@
     text-align: center;
   }
 
+  /* One file row; its action buttons appear on hover. */
   .file {
     position: relative;
     padding: 8px 12px;
@@ -241,6 +281,7 @@
   .file .twist { flex: 0 0 11px; color: #8c959f; font-size: 8px; line-height: 18px; }
   .file .fdir { font-size: 11px; color: #8c959f; }
 
+  /* Row action buttons, shown on hover. */
   .file .acts { position: absolute; top: 5px; right: 8px; display: none; gap: 2px; }
   .file:hover .acts { display: flex; }
   .file .acts button {
@@ -255,8 +296,10 @@
   #empty { padding: 24px; text-align: center; color: #8c959f; font-size: 13px; line-height: 1.6; }
 
   /* ── Viewer ── */
+  /* The right pane: toolbar, then the viewer, install screen or placeholder. */
   #right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
+  /* The file toolbar, hidden until a file is open. */
   #toolbar {
     flex: 0 0 auto;
     display: none;
@@ -272,17 +315,20 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   #toolbar .filename b { color: #1f2328; font-weight: 600; }
+  /* The unsaved-changes marker. */
   #dirty { font-size: 11px; color: #9a6700; background: #fff8c5; border: 1px solid #d4a72c55;
            border-radius: 999px; padding: 1px 8px; display: none; }
   #dirty.on { display: inline-block; }
 
   #scroll { flex: 1; overflow: auto; min-height: 0; }
+  /* Placeholder, welcome and install screens. */
   #placeholder {
     height: 100%; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px; color: #8c959f;
   }
   #placeholder p { font-size: 18px; font-weight: 600; color: #57606a; }
   #placeholder small { font-size: 13px; }
+  /* Install options: model buttons, mount command, chip details, recovery steps. */
   #bootsel-options { display: none; flex-direction: column; align-items: center; gap: 12px; margin: 12px 0 14px; }
   #bootsel-options .board-choices { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
   #bootsel-options.visible { display: flex; }
@@ -301,6 +347,7 @@
   #bootsel-options .install-option input { grid-row: 1 / 3; margin-top: 7px; }
   #bootsel-options .install-option > span { color: #24292f; font-weight: 400; }
   #bootsel-options .install-option small { color: #57606a; line-height: 1.4; }
+  /* A command with a copy button. */
   .mount-command { display: flex; align-items: center; gap: 8px; }
   .mount-command code { padding: 9px 12px; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }
   #dialog-message .mount-command { margin: 10px 0 18px; white-space: normal; }
@@ -313,6 +360,7 @@
   #bootsel-source { display: none; }
   #bootsel-source.visible { display: block; }
   #bootsel-source a { color: #0969da; }
+  /* Chip details of a device in install mode. */
   .boot-details {
     display: grid; grid-template-columns: auto 1fr; gap: 2px 18px;
     max-width: 620px; margin: 0; text-align: left;
@@ -326,7 +374,9 @@
   .recovery-steps { display: grid; gap: 12px; max-width: 680px; padding: 0 24px; text-align: center; color: #24292f; line-height: 1.5; }
 
   /* Keep wrapped text beside its source line number. */
+  /* File viewer: a grid of line numbers and source lines. */
   #viewer { display: none; flex-direction: column; min-height: 100%; }
+  /* Code: a two-column grid of line numbers and source lines. */
   #code { flex: 1 0 auto; display: grid; grid-template-columns: max-content minmax(0, 1fr);
           align-content: start; grid-auto-rows: max-content;
           position: relative;
@@ -335,6 +385,7 @@
             #fff var(--gutter-width, 0px), #fff 100%);
           font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
           font-size: 12.5px; line-height: 1.55; }
+  /* Each row's cells join the grid directly. */
   .code-row { display: contents; }
   .line-no {
     text-align: right; padding: 0 10px; color: #8c959f;
@@ -347,14 +398,17 @@
   @media (min-width: 700px) {
     .line-src { white-space: pre-wrap; overflow-wrap: anywhere; }
   }
+  /* The text editor. */
   #editor {
     display: none; width: 100%; height: 100%; border: 0; outline: none; resize: none;
     padding: 16px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
     font-size: 12.5px; line-height: 1.55; tab-size: 4; color: #1f2328; background: #fff;
   }
+  /* Binary file notice. */
   #binary { display: none; padding: 40px; text-align: center; color: #57606a; font-size: 14px; }
 
   /* Python and JSON highlighting. */
+  /* Highlight colours: keywords, strings, numbers, comments, decorators, keys. */
   .tok-kw  { color: #cf222e; }
   .tok-str { color: #0a3069; }
   .tok-com { color: #6e7781; font-style: italic; }
@@ -363,8 +417,10 @@
   .tok-key { color: #0550ae; }
 
   /* GitHub-style Markdown. */
+  /* Markdown preview and the full-screen README. */
   #md, #readme-content { max-width: 800px; margin: 0 auto; padding: 32px 32px 80px; }
   #md { display: none; }
+  /* The full-screen README replaces the main area. */
   #readme-screen { display: none; flex: 1; min-height: 0; overflow: auto; background: #fff; }
   #readme-content { width: 100%; }
   #md h1, #md h2, #readme-content h1, #readme-content h2 { padding-bottom: 0.3em; border-bottom: 1px solid #d0d7de; }
@@ -395,16 +451,19 @@
   #readme-content table.options-table td:nth-child(4) { width: 47%; }
 
   /* ── Console drawer ── */
+  /* Console drawer: resize handle, header, output and the input line. */
   #console { flex: 0 0 auto; display: flex; flex-direction: column; border-top: 1px solid #d0d7de;
              background: #f6f8fa; max-height: calc(100% - 100px); min-height: 0; overflow: hidden; }
   #console.open { flex-basis: var(--console-height, 35%); }
   #console:not(.open) { flex-basis: auto !important; }
+  /* The console resize handle along its top edge. */
   #console-resize {
     display: none; flex: 0 0 7px; cursor: row-resize;
     background: #d0d7de; touch-action: none;
   }
   #console.open #console-resize { display: block; }
   #console-resize:hover, #console-resize.dragging { background: #0969da; }
+  /* The console header bar. */
   #conhead { display: flex; align-items: center; gap: 8px; padding: 6px 16px; cursor: pointer;
              flex: 0 0 auto; user-select: none; }
   #conhead .t { font-size: 12px; font-weight: 600; color: #1f2328; }
@@ -412,6 +471,7 @@
   #conhead .sp { flex: 1; }
   #conbody { display: none; flex-direction: column; min-height: 0; overflow: hidden; background: #fff; }
   #console.open #conbody { display: flex; flex: 1; }
+  /* Console output, colour-coded by type. */
   #conout {
     flex: 1; overflow-y: auto; height: 0; min-height: 0; padding: 10px 16px; margin: 0;
     font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
@@ -419,14 +479,17 @@
   }
   #conout .e { color: #cf222e; }
   #conout .s { color: #6e7781; }
+  /* Console input line. */
   #conin-wrap { flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
                 border-top: 1px solid #eaeef2; padding: 6px 16px; }
   #conin-wrap .p { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #8c959f; }
+  /* The console input field. */
   #conin {
     flex: 1; border: 0; outline: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; color: #1f2328; background: transparent;
   }
 
+  /* Toast messages, the hover tooltip, and the busy indicator. */
   #toast {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     background: #1f2328; color: #fff; font-size: 13px; padding: 8px 16px;
@@ -436,6 +499,7 @@
   #toast.show { opacity: 1; }
   #toast.bad { background: #cf222e; }
   #toast.good { background: #1a7f37; }
+  /* The shared tooltip. */
   #hover-tooltip {
     position: fixed; z-index: 300; display: none; pointer-events: none;
     max-width: min(320px, calc(100vw - 16px)); padding: 5px 9px;
@@ -444,6 +508,7 @@
     box-shadow: 0 4px 12px rgba(31,35,40,0.15);
     font-size: 12px; line-height: 18px; white-space: normal;
   }
+  /* The busy bar along the top of the window. */
   #busy {
     position: fixed; top: 0; left: 0; height: 2px; width: 100%; z-index: 200;
     background: linear-gradient(90deg, transparent, #0969da, transparent);
@@ -452,35 +517,556 @@
   }
   #busy.on { display: block; }
   @keyframes slide { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+
+  /* ── Theme Toggle (ctrlpi-lab style) ── */
+  /* The theme toggle shows a sun in light mode and a moon in dark mode. */
+  .theme-toggle-btn {
+    background: transparent;
+    border: none;
+    color: #57606a;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.25s ease;
+    outline: none;
+    flex-shrink: 0;
+  }
+  .theme-toggle-btn:hover {
+    color: #1f2328;
+    background: rgba(31,35,40,0.08);
+    transform: scale(1.05);
+  }
+  .theme-toggle-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+    transition: transform 0.4s ease;
+  }
+  .theme-toggle-btn .sun-icon {
+    display: block;
+    fill: #fbbf24;
+  }
+  .theme-toggle-btn .moon-icon {
+    display: none;
+  }
+
+  /* ── Dark Mode ── */
+  body.dark-mode, html.dark-mode body {
+    color: #e6edf3;
+    background: #0d1117;
+  }
+  /* Dark mode for each component above, in the same order. Both body and html carry the
+     class so the theme applies before the page finishes loading. */
+  body.dark-mode #topbar, html.dark-mode #topbar {
+    background: #161b22;
+    border-bottom-color: #30363d;
+  }
+  body.dark-mode #topbar .brand, html.dark-mode #topbar .brand { color: #e6edf3; }
+  body.dark-mode #pills .no-board, html.dark-mode #pills .no-board { color: #8b949e; }
+  /* Pills. */
+  body.dark-mode .pill, html.dark-mode .pill {
+    color: #c9d1d9;
+    background: #21262d;
+    border-color: #30363d;
+  }
+  body.dark-mode .pill:hover, html.dark-mode .pill:hover {
+    background: #30363d;
+    border-color: #8b949e;
+  }
+  body.dark-mode .pill.active, html.dark-mode .pill.active {
+    background: rgba(56,139,253,0.15);
+    border-color: #388bfd;
+    color: #58a6ff;
+  }
+  body.dark-mode .pill.micropython, html.dark-mode .pill.micropython {
+    border-color: rgba(56,139,253,0.4);
+  }
+  body.dark-mode .pill.micropython .pico-icon, html.dark-mode .pill.micropython .pico-icon { color: #58a6ff; }
+  body.dark-mode .pill.circuitpython, html.dark-mode .pill.circuitpython {
+    border-color: rgba(240,136,62,0.45);
+  }
+  body.dark-mode .pill.circuitpython .pico-icon, html.dark-mode .pill.circuitpython .pico-icon { color: #f0883e; }
+  body.dark-mode .pill.bootsel, html.dark-mode .pill.bootsel {
+    color: #f85149;
+    background: rgba(248,81,73,0.15);
+    border-color: rgba(248,81,73,0.5);
+  }
+  body.dark-mode .pill.bad, html.dark-mode .pill.bad {
+    color: #f85149;
+    border-color: rgba(248,81,73,0.4);
+  }
+  body.dark-mode .pill .serial, html.dark-mode .pill .serial { color: #8b949e; }
+  body.dark-mode .pill .readonly, html.dark-mode .pill .readonly { color: #d2a8ff; }
+  body.dark-mode .pill.active .serial, html.dark-mode .pill.active .serial { color: #58a6ff; }
+  body.dark-mode .pill .pico-icon, html.dark-mode .pill .pico-icon { color: #8b949e; }
+  body.dark-mode .pill.bad .pico-icon, body.dark-mode .pill.bootsel .pico-icon,
+  html.dark-mode .pill.bad .pico-icon, html.dark-mode .pill.bootsel .pico-icon { color: #f85149; }
+
+  body.dark-mode #storage, html.dark-mode #storage { color: #8b949e; }
+  body.dark-mode #storage .bar, html.dark-mode #storage .bar { background: #30363d; }
+  body.dark-mode #storage .bar:hover, html.dark-mode #storage .bar:hover { box-shadow: 0 0 0 2px rgba(56,139,253,0.3); }
+  body.dark-mode #storage .bar i, html.dark-mode #storage .bar i { background: #58a6ff; }
+
+  /* Status banner. */
+  body.dark-mode #connection-status, html.dark-mode #connection-status {
+    background: rgba(248,81,73,0.15);
+    border-bottom-color: rgba(248,81,73,0.4);
+    color: #f85149;
+  }
+  body.dark-mode #connection-status.mount-warning, html.dark-mode #connection-status.mount-warning {
+    color: #d29922;
+    background: rgba(187,128,9,0.15);
+    border-bottom-color: rgba(187,128,9,0.4);
+  }
+  body.dark-mode #connection-status code, html.dark-mode #connection-status code {
+    background: rgba(248,81,73,0.25);
+  }
+  body.dark-mode #connection-status-close, html.dark-mode #connection-status-close { color: #f85149; }
+  body.dark-mode #connection-status-close:hover, html.dark-mode #connection-status-close:hover { background: rgba(248,81,73,0.2); }
+  body.dark-mode #connection-status.mount-warning #connection-status-close,
+  html.dark-mode #connection-status.mount-warning #connection-status-close { color: #d29922; }
+
+  /* Buttons. */
+  body.dark-mode .btn, html.dark-mode .btn {
+    color: #c9d1d9;
+    background: #21262d;
+    border-color: #30363d;
+  }
+  body.dark-mode .btn:hover:not(:disabled), html.dark-mode .btn:hover:not(:disabled) {
+    background: #30363d;
+    border-color: #8b949e;
+    color: #e6edf3;
+  }
+  body.dark-mode .btn:active:not(:disabled), html.dark-mode .btn:active:not(:disabled) {
+    background: #282e33;
+  }
+  body.dark-mode #refresh-btn, html.dark-mode #refresh-btn {
+    background: transparent;
+    border-color: transparent;
+    color: #8b949e;
+  }
+  body.dark-mode #refresh-btn:hover:not(:disabled), html.dark-mode #refresh-btn:hover:not(:disabled) {
+    color: #58a6ff;
+    background: transparent;
+    border-color: transparent;
+  }
+  body.dark-mode #refresh-btn.refreshing, html.dark-mode #refresh-btn.refreshing {
+    color: #58a6ff;
+  }
+  body.dark-mode .btn.primary, html.dark-mode .btn.primary {
+    background: #238636;
+    border-color: #2ea043;
+    color: #fff;
+  }
+  body.dark-mode .btn.primary:hover:not(:disabled), html.dark-mode .btn.primary:hover:not(:disabled) {
+    background: #2ea043;
+  }
+  body.dark-mode .btn.del, html.dark-mode .btn.del {
+    color: #f85149;
+  }
+  body.dark-mode .btn.del:hover:not(:disabled), html.dark-mode .btn.del:hover:not(:disabled) {
+    background: rgba(248,81,73,0.15);
+    border-color: #f85149;
+    color: #f85149;
+  }
+  body.dark-mode .file.drop-target, body.dark-mode #filelist.dropping,
+  html.dark-mode .file.drop-target, html.dark-mode #filelist.dropping {
+    background: rgba(56,139,253,0.15);
+    outline-color: #58a6ff;
+  }
+
+  body.dark-mode .theme-toggle-btn, html.dark-mode .theme-toggle-btn {
+    color: #8b949e;
+  }
+  body.dark-mode .theme-toggle-btn:hover, html.dark-mode .theme-toggle-btn:hover {
+    color: #e6edf3;
+    background: rgba(255,255,255,0.08);
+  }
+  body.dark-mode .theme-toggle-btn .sun-icon, html.dark-mode .theme-toggle-btn .sun-icon {
+    display: none;
+  }
+  body.dark-mode .theme-toggle-btn .moon-icon, html.dark-mode .theme-toggle-btn .moon-icon {
+    display: block;
+    fill: #93c5fd;
+  }
+  body.dark-mode .theme-toggle-btn svg, html.dark-mode .theme-toggle-btn svg {
+    transform: rotate(360deg);
+  }
+
+  body.dark-mode #menu, body.dark-mode .dropdown-menu,
+  /* Menus. */
+  html.dark-mode #menu, html.dark-mode .dropdown-menu {
+    background: #161b22;
+    border-color: #30363d;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  body.dark-mode #menu button, body.dark-mode #menu a, body.dark-mode .dropdown-menu button,
+  html.dark-mode #menu button, html.dark-mode #menu a, html.dark-mode .dropdown-menu button {
+    color: #c9d1d9;
+  }
+  body.dark-mode #menu button:hover, body.dark-mode #menu a:hover, body.dark-mode .dropdown-menu button:hover,
+  html.dark-mode #menu button:hover, html.dark-mode #menu a:hover, html.dark-mode .dropdown-menu button:hover {
+    background: #21262d;
+    color: #e6edf3;
+  }
+  body.dark-mode #menu button:disabled, html.dark-mode #menu button:disabled {
+    color: #6e7681;
+  }
+  body.dark-mode #menu button:disabled:hover, html.dark-mode #menu button:disabled:hover {
+    background: none;
+  }
+  body.dark-mode #menu button.danger, body.dark-mode .dropdown-menu button.danger,
+  html.dark-mode #menu button.danger, html.dark-mode .dropdown-menu button.danger {
+    color: #f85149;
+  }
+  body.dark-mode #menu button.danger:hover, body.dark-mode .dropdown-menu button.danger:hover,
+  html.dark-mode #menu button.danger:hover, html.dark-mode .dropdown-menu button.danger:hover {
+    background: rgba(248,81,73,0.15);
+  }
+  body.dark-mode #menu .menu-label-detail, html.dark-mode #menu .menu-label-detail {
+    color: #8b949e;
+  }
+  body.dark-mode #menu .menu-checkmark, html.dark-mode #menu .menu-checkmark {
+    color: #58a6ff;
+  }
+  body.dark-mode #menu .menu-off, html.dark-mode #menu .menu-off {
+    color: #f85149;
+  }
+  body.dark-mode #menu hr, body.dark-mode .dropdown-menu hr,
+  html.dark-mode #menu hr, html.dark-mode .dropdown-menu hr {
+    border-top-color: #30363d;
+  }
+  body.dark-mode #ctrlpi-install-btn, html.dark-mode #ctrlpi-install-btn {
+    color: #58a6ff !important;
+  }
+
+  /* Dialogs. */
+  body.dark-mode #app-dialog, html.dark-mode #app-dialog {
+    background: #161b22;
+    border-color: #30363d;
+    color: #c9d1d9;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  }
+  body.dark-mode #app-dialog::backdrop, html.dark-mode #app-dialog::backdrop {
+    background: rgba(0,0,0,0.6);
+  }
+  body.dark-mode #dialog-title, html.dark-mode #dialog-title { color: #e6edf3; }
+  body.dark-mode #dialog-message, html.dark-mode #dialog-message { color: #8b949e; }
+  body.dark-mode #dialog-message a, html.dark-mode #dialog-message a { color: #58a6ff; }
+  body.dark-mode #dialog-input, html.dark-mode #dialog-input {
+    background: #0d1117;
+    border-color: #30363d;
+    color: #e6edf3;
+  }
+  body.dark-mode #dialog-input:focus, html.dark-mode #dialog-input:focus {
+    border-color: #58a6ff;
+    box-shadow: 0 0 0 2px rgba(56,139,253,0.25);
+  }
+  body.dark-mode #dialog-footer, html.dark-mode #dialog-footer { color: #8b949e; }
+  body.dark-mode #dialog-footer a, html.dark-mode #dialog-footer a { color: #58a6ff; }
+  body.dark-mode #dialog-confirm.dialog-danger, html.dark-mode #dialog-confirm.dialog-danger {
+    background: #da3633;
+    border-color: #f85149;
+  }
+  body.dark-mode #dialog-confirm.dialog-danger:hover, html.dark-mode #dialog-confirm.dialog-danger:hover {
+    background: #b62324;
+  }
+
+  body.dark-mode #ctrlpi-dialog, html.dark-mode #ctrlpi-dialog {
+    background: #161b22;
+    border-color: #30363d;
+    color: #e6edf3;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  }
+  body.dark-mode #ctrlpi-dialog input, html.dark-mode #ctrlpi-dialog input {
+    background: #0d1117;
+    border-color: #30363d;
+    color: #e6edf3;
+  }
+  body.dark-mode #ctrlpi-dialog input:focus, html.dark-mode #ctrlpi-dialog input:focus {
+    border-color: #58a6ff;
+    box-shadow: 0 0 0 2px rgba(56,139,253,0.25);
+  }
+  body.dark-mode #ctrlpi-dialog div[style*="color: #57606a"],
+  html.dark-mode #ctrlpi-dialog div[style*="color: #57606a"] {
+    color: #8b949e !important;
+  }
+
+  /* Sidebar and file tree. */
+  body.dark-mode #sidebar, html.dark-mode #sidebar {
+    background: #0d1117;
+  }
+  body.dark-mode #dragbar, html.dark-mode #dragbar {
+    background: #30363d;
+    border-left-color: #30363d;
+  }
+  body.dark-mode #dragbar:hover, body.dark-mode #dragbar.dragging,
+  html.dark-mode #dragbar:hover, html.dark-mode #dragbar.dragging {
+    background: #58a6ff;
+  }
+  body.dark-mode #search-wrap, html.dark-mode #search-wrap {
+    border-bottom-color: #30363d;
+  }
+  body.dark-mode #search, html.dark-mode #search {
+    background: #0d1117;
+    border-color: #30363d;
+    color: #e6edf3;
+  }
+  body.dark-mode #search:focus, html.dark-mode #search:focus {
+    border-color: #58a6ff;
+    box-shadow: 0 0 0 2px rgba(56,139,253,0.25);
+  }
+  body.dark-mode #upload-hint, html.dark-mode #upload-hint {
+    border-top-color: #30363d;
+    color: #8b949e;
+  }
+  body.dark-mode .file, html.dark-mode .file {
+    border-bottom-color: #21262d;
+  }
+  body.dark-mode .file:hover, html.dark-mode .file:hover {
+    background: #161b22;
+  }
+  body.dark-mode .file.active, html.dark-mode .file.active {
+    background: rgba(56,139,253,0.15);
+  }
+  body.dark-mode .file .fname, html.dark-mode .file .fname { color: #c9d1d9; }
+  body.dark-mode .file.dir .fname, html.dark-mode .file.dir .fname { color: #58a6ff; }
+  body.dark-mode .file .fmeta, body.dark-mode .file .twist, body.dark-mode .file .fdir,
+  html.dark-mode .file .fmeta, html.dark-mode .file .twist, html.dark-mode .file .fdir { color: #8b949e; }
+  body.dark-mode .file .acts button, html.dark-mode .file .acts button {
+    background: #21262d;
+    border-color: #30363d;
+    color: #8b949e;
+  }
+  body.dark-mode .file .acts button:hover, html.dark-mode .file .acts button:hover {
+    background: #30363d;
+    color: #e6edf3;
+  }
+  body.dark-mode .file .acts button.del, html.dark-mode .file .acts button.del { color: #f85149; }
+  body.dark-mode .file .acts button.del:hover, html.dark-mode .file .acts button.del:hover {
+    background: rgba(248,81,73,0.15);
+    border-color: #f85149;
+    color: #f85149;
+  }
+  body.dark-mode #empty, html.dark-mode #empty { color: #8b949e; }
+
+  /* Right pane, placeholder and install screens. */
+  body.dark-mode #right, html.dark-mode #right {
+    background: #0d1117;
+  }
+  body.dark-mode #toolbar, html.dark-mode #toolbar {
+    background: #161b22;
+    border-bottom-color: #30363d;
+  }
+  body.dark-mode #toolbar .filename, html.dark-mode #toolbar .filename { color: #8b949e; }
+  body.dark-mode #toolbar .filename b, html.dark-mode #toolbar .filename b { color: #e6edf3; }
+  body.dark-mode #dirty, html.dark-mode #dirty {
+    color: #d29922;
+    background: rgba(187,128,9,0.15);
+    border-color: rgba(187,128,9,0.3);
+  }
+
+  body.dark-mode #placeholder, html.dark-mode #placeholder { color: #8b949e; }
+  body.dark-mode #placeholder p, html.dark-mode #placeholder p { color: #c9d1d9; }
+  body.dark-mode #main.welcome-mode #ph-title, html.dark-mode #main.welcome-mode #ph-title { color: #e6edf3; }
+  body.dark-mode #main.welcome-mode #ph-sub, html.dark-mode #main.welcome-mode #ph-sub { color: #8b949e; }
+  body.dark-mode .welcome-content strong, html.dark-mode .welcome-content strong { color: #e6edf3; }
+  body.dark-mode .welcome-content .welcome-heading, html.dark-mode .welcome-content .welcome-heading { color: #3fb950; }
+  body.dark-mode #bootsel-options .install-note, html.dark-mode #bootsel-options .install-note { color: #8b949e; }
+  body.dark-mode #bootsel-options .install-unavailable, html.dark-mode #bootsel-options .install-unavailable { color: #f85149; }
+  body.dark-mode #bootsel-options .install-option > span, html.dark-mode #bootsel-options .install-option > span { color: #e6edf3; }
+  body.dark-mode #bootsel-options .install-option small, html.dark-mode #bootsel-options .install-option small { color: #8b949e; }
+  body.dark-mode .mount-command code, html.dark-mode .mount-command code {
+    color: #e6edf3;
+    background: #161b22;
+    border-color: #30363d;
+  }
+  body.dark-mode #bootsel-source a, html.dark-mode #bootsel-source a { color: #58a6ff; }
+  body.dark-mode .boot-details dt, html.dark-mode .boot-details dt { color: #8b949e; }
+  body.dark-mode .boot-details dd, html.dark-mode .boot-details dd { color: #c9d1d9; }
+  body.dark-mode .install-warning, html.dark-mode .install-warning { color: #f85149; }
+  body.dark-mode [data-copy-command].copied, html.dark-mode [data-copy-command].copied {
+    color: #3fb950;
+    border-color: #3fb950;
+  }
+  body.dark-mode .recovery-steps, html.dark-mode .recovery-steps { color: #c9d1d9; }
+
+  /* Code viewer, editor and highlighting. */
+  body.dark-mode #code, html.dark-mode #code {
+    background: linear-gradient(to right,
+      #161b22 0, #161b22 var(--gutter-width, 0px),
+      #0d1117 var(--gutter-width, 0px), #0d1117 100%);
+    color: #c9d1d9;
+  }
+  body.dark-mode .line-no, html.dark-mode .line-no {
+    color: #6e7681;
+    background: #161b22;
+    border-right-color: #30363d;
+  }
+  body.dark-mode .line-src, html.dark-mode .line-src { color: #c9d1d9; }
+  body.dark-mode #editor, html.dark-mode #editor {
+    color: #e6edf3;
+    background: #0d1117;
+  }
+  body.dark-mode #binary, html.dark-mode #binary { color: #8b949e; }
+
+  body.dark-mode .tok-kw, html.dark-mode .tok-kw   { color: #ff7b72; }
+  body.dark-mode .tok-str, html.dark-mode .tok-str  { color: #a5d6ff; }
+  body.dark-mode .tok-com, html.dark-mode .tok-com  { color: #8b949e; }
+  body.dark-mode .tok-num, html.dark-mode .tok-num  { color: #79c0ff; }
+  body.dark-mode .tok-dec, html.dark-mode .tok-dec  { color: #d2a8ff; }
+  body.dark-mode .tok-key, html.dark-mode .tok-key  { color: #79c0ff; }
+
+  /* Markdown and README. */
+  body.dark-mode #readme-screen, html.dark-mode #readme-screen {
+    background: #0d1117;
+    color: #c9d1d9;
+  }
+  body.dark-mode #md h1, body.dark-mode #md h2,
+  body.dark-mode #readme-content h1, body.dark-mode #readme-content h2,
+  html.dark-mode #md h1, html.dark-mode #md h2,
+  html.dark-mode #readme-content h1, html.dark-mode #readme-content h2 {
+    border-bottom-color: #30363d;
+  }
+  body.dark-mode #md a, body.dark-mode #readme-content a,
+  html.dark-mode #md a, html.dark-mode #readme-content a {
+    color: #58a6ff;
+  }
+  body.dark-mode #md code, body.dark-mode #readme-content code,
+  html.dark-mode #md code, html.dark-mode #readme-content code {
+    background: rgba(110,118,129,0.4);
+    color: #e6edf3;
+  }
+  body.dark-mode #md pre, body.dark-mode #readme-content pre,
+  html.dark-mode #md pre, html.dark-mode #readme-content pre {
+    background: #161b22;
+    color: #e6edf3;
+  }
+  body.dark-mode #md blockquote, body.dark-mode #readme-content blockquote,
+  html.dark-mode #md blockquote, html.dark-mode #readme-content blockquote {
+    color: #8b949e;
+    border-left-color: #30363d;
+  }
+  body.dark-mode #md table th, body.dark-mode #md table td,
+  body.dark-mode #readme-content table th, body.dark-mode #readme-content table td,
+  html.dark-mode #md table th, html.dark-mode #md table td,
+  html.dark-mode #readme-content table th, html.dark-mode #readme-content table td {
+    border-color: #30363d;
+  }
+
+  /* Console. */
+  body.dark-mode #console, html.dark-mode #console {
+    border-top-color: #30363d;
+    background: #161b22;
+  }
+  body.dark-mode #console-resize, html.dark-mode #console-resize {
+    background: #30363d;
+  }
+  body.dark-mode #console-resize:hover, body.dark-mode #console-resize.dragging,
+  html.dark-mode #console-resize:hover, html.dark-mode #console-resize.dragging {
+    background: #58a6ff;
+  }
+  body.dark-mode #conhead .t, html.dark-mode #conhead .t { color: #e6edf3; }
+  body.dark-mode #conhead .chev, html.dark-mode #conhead .chev { color: #8b949e; }
+  body.dark-mode #conbody, html.dark-mode #conbody {
+    background: #0d1117;
+  }
+  body.dark-mode #conout, html.dark-mode #conout {
+    color: #e6edf3;
+  }
+  body.dark-mode #conout .e, html.dark-mode #conout .e { color: #f85149; }
+  body.dark-mode #conout .s, html.dark-mode #conout .s { color: #8b949e; }
+  body.dark-mode #conin-wrap, html.dark-mode #conin-wrap {
+    border-top-color: #21262d;
+  }
+  body.dark-mode #conin-wrap .p, html.dark-mode #conin-wrap .p { color: #6e7681; }
+  body.dark-mode #conin, html.dark-mode #conin {
+    color: #e6edf3;
+  }
+
+  /* Toast, tooltip and scrollbars. */
+  body.dark-mode #toast, html.dark-mode #toast {
+    background: #21262d;
+    color: #e6edf3;
+    border: 1px solid #30363d;
+  }
+  body.dark-mode #toast.bad, html.dark-mode #toast.bad { background: #da3633; }
+  body.dark-mode #toast.good, html.dark-mode #toast.good { background: #238636; }
+  body.dark-mode #hover-tooltip, html.dark-mode #hover-tooltip {
+    color: #e6edf3;
+    background: #161b22;
+    border-color: #30363d;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+  body.dark-mode *::-webkit-scrollbar, html.dark-mode *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  body.dark-mode *::-webkit-scrollbar-track, html.dark-mode *::-webkit-scrollbar-track {
+    background: #161b22;
+  }
+  body.dark-mode *::-webkit-scrollbar-thumb, html.dark-mode *::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 4px;
+  }
+  body.dark-mode *::-webkit-scrollbar-thumb:hover, html.dark-mode *::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+  }
 </style>
 </head>
 <body>
 
+<!-- Thin bar at the top while an API call is running. -->
 <div id="busy"></div>
 
+<!-- Top bar: brand, board pills, Scan, storage usage, theme and the "More actions" menu. -->
 <div id="topbar">
+  <!-- The brand returns to the welcome screen. -->
   <a class="brand" href="/" onclick="showWelcome(true); return false;" title="Welcome message">Pico Bay</a>
+  <!-- One pill per connected device, filled in by renderPills(). -->
   <span id="pills"></span>
+  <!-- Scan: identify every connected board again. -->
   <button class="btn icon" id="refresh-btn" onclick="refreshDevices()" title="Scan USB for connected boards">
     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
   </button>
   <span id="spacer"></span>
   <span id="storage"></span>
+  <!-- Dark / light theme toggle. -->
+  <button id="themeToggleBtn" class="theme-toggle-btn" onclick="toggleTheme()" title="Toggle Dark/Light Mode" aria-label="Toggle Dark/Light Mode">
+    <!-- Sun Icon (shown in Bright mode) -->
+    <svg class="sun-icon" viewBox="0 0 24 24">
+      <path d="M12 7c-2.76 0-5 2.24-5 5s2.24 5 5 5 5-2.24 5-5-2.24-5-5-5zM2 13h2c.55 0 1-.45 1-1s-.45-1-1-1H2c-.55 0-1 .45-1 1s.45 1 1 1zm18 0h2c.55 0 1-.45 1-1s-.45-1-1-1h-2c-.55 0-1 .45-1 1s.45 1 1 1zM11 2v2c0 .55.45 1 1 1s1-.45 1-1V2c0-.55-.45-1-1-1s-1 .45-1 1zm0 18v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1s-1 .45-1 1zM5.99 4.58c-.39-.39-1.03-.39-1.41 0s-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41L5.99 4.58zm12.37 12.37c-.39-.39-1.03-.39-1.41 0s-.39 1.03 0 1.41l1.06 1.06c.39.39 1.03.39 1.41 0s.39-1.03 0-1.41l-1.06-1.06zm1.06-12.37c-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06c.39-.38.39-1.02 0-1.41zm-12.37 12.37c-.39-.39-1.03-.39-1.41 0l-1.06 1.06c-.39.39-.39 1.03 0 1.41s1.03.39 1.41 0l1.06-1.06c.39-.38.39-1.02 0-1.41z" />
+    </svg>
+    <!-- Moon Icon (shown in Dark mode) -->
+    <svg class="moon-icon" viewBox="0 0 24 24">
+      <path d="M12.3 22h-.1c-5.5 0-10-4.5-10-10 0-4.8 3.5-8.9 8.2-9.8.6-.1 1.2.3 1.3.9.1.6-.2 1.2-.8 1.4-3.5.9-6 4-6 7.7 0 4.4 3.6 8 8 8 3.7 0 6.8-2.5 7.7-6 .2-.6.8-.9 1.4-.8.6.1 1 .7.9 1.3-.9 4.7-5 8.2-9.8 8.3z" />
+    </svg>
+  </button>
+  <!-- "More actions": file, board, install and app items; items that need a writable
+       board carry the requires-write class. -->
   <span id="menuwrap">
     <button class="btn icon" id="menu-btn" onclick="toggleMenu(event)" title="More actions" disabled>
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM1.5 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm13 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/></svg>
     </button>
     <div id="menu">
+      <!-- Upload, and Install ctrlPi API (shown on a Pico W / Pico 2 W only). -->
       <button class="requires-write" onclick="pickUpload()">Upload files…</button>
       <button class="requires-write" onclick="pickUploadFolder()">Upload folder…</button>
       <button class="requires-write" id="ctrlpi-install-btn" style="color: #0969da; display: none;" onclick="openCtrlPiDialog()">Install ctrlPi API</button>
       <hr>
+      <!-- New file and folder. -->
       <button class="requires-write" onclick="newFile()">New file…</button>
       <button class="requires-write" onclick="newFolder()">New folder…</button>
       <hr>
+      <!-- Backup and restore of the whole filesystem. -->
       <button class="requires-device" onclick="downloadAll()">Download ZIP</button>
       <button class="requires-write" onclick="pickRestore()">Restore from ZIP…</button>
       <hr>
+      <!-- Toggles: hide dot files, and HTTP MCP on this server. -->
       <button class="menu-toggle" id="hide-system-files" onclick="toggleSystemFiles()"
         aria-pressed="true"><span>Hide system files</span><svg class="menu-checkmark" aria-hidden="true"
           width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 8.5 6.5 12 13 4.5"
@@ -497,15 +1083,20 @@
         </span>
       </button>
       <hr>
+      <!-- Board control. -->
       <button class="requires-device" onclick="doInterrupt()">Interrupt (Ctrl-C)</button>
       <button class="requires-device" onclick="doReset(false)">Soft reset (restart)</button>
       <button class="requires-device" onclick="doReset(true)">Hard reset (reconnect)</button>
       <hr>
+      <!-- Destructive actions: wipe the board, install mode, Pi USB power help. -->
       <button class="danger requires-write" onclick="doClean()">Delete all files…</button>
       <button class="danger requires-device" id="bootloader-btn" onclick="doBootloader()" hidden>Reboot to BOOTSEL</button>
       <button class="danger" id="reset-pi-usb-btn" onclick="showPiUsbPowerHelp()" hidden>Toggle Pi USB Power</button>
       <hr>
+      <!-- Help and about. -->
       <button onclick="showReadme()">README.md</button>
+      <a href="https://pico-bay.ctrlpi.com/pinout/pico"
+        target="_blank" rel="noopener noreferrer">Pico Pinout ↗</a>
       <a href="https://www.raspberrypi.com/documentation/microcontrollers/micropython.html"
         target="_blank" rel="noopener noreferrer">MicroPython documentation ↗</a>
       <a href="https://docs.circuitpython.org/en/latest/README.html"
@@ -515,14 +1106,18 @@
   </span>
 </div>
 
+<!-- Status banner: lost server connection, Pi power warning or a mount command. -->
 <div id="connection-status" role="status" aria-live="polite">
   <span id="connection-status-message">Connection to the Pico Bay server was lost. Check that the server is still running; reconnecting automatically…</span>
   <button id="connection-status-close" type="button" aria-label="Dismiss warning" title="Dismiss warning">×</button>
 </div>
 
+<!-- Main area: file tree on the left, file or install screen on the right. -->
 <div id="main">
+  <!-- File tree with its search box. -->
   <div id="sidebar">
     <div id="search-wrap">
+      <!-- Filter, plus New file and New folder shortcuts. -->
       <input id="search" type="text" placeholder="Filter files…" autocomplete="off">
       <button class="btn icon" onclick="newFile()" title="New file" id="new-btn" disabled>
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.75 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 7.75 2Z"/></svg>
@@ -534,15 +1129,21 @@
     <div id="filelist"></div>
   </div>
 
+  <!-- Drag to resize the sidebar. -->
   <div id="dragbar" title="Drag to resize"></div>
 
+  <!-- Right pane: file toolbar, scrolling content, and the console drawer. -->
   <div id="right">
+    <!-- File toolbar: name, unsaved marker, run, edit, save, move, rename, download, delete. -->
     <div id="toolbar">
+      <!-- Open file's path and size, and the unsaved marker. -->
       <span class="filename" id="filename"></span>
       <span id="dirty">unsaved</span>
+      <!-- Run (Python files only). -->
       <button class="btn icon" id="run-btn" onclick="runFile()" title="Run this file on the board">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M4.25 2.5a.75.75 0 0 1 1.14-.64l7.5 5.5a.75.75 0 0 1 0 1.28l-7.5 5.5a.75.75 0 0 1-1.14-.64Z"/></svg>
       </button>
+      <!-- Download, Edit, Rename. -->
       <button class="btn icon" id="download-btn" onclick="downloadFile()" title="Download to this computer">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06ZM1.75 11a.75.75 0 0 1 .75.75v1.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25v-1.5a.75.75 0 0 1 .75-.75Z"/></svg>
       </button>
@@ -552,15 +1153,18 @@
       <button class="btn icon" id="rename-btn" onclick="renameCurrentFile()" title="Rename this file">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2h7c2.5 0 4 1.2 4 3.5 0 1.7-1 2.8-2.5 3.3L14 14h-2.3l-2.7-5.2H4V14H2Zm2 2v4h5c1.2 0 2-.6 2-2s-.8-2-2-2H4Z"/></svg>
       </button>
+      <!-- Move to another folder. -->
       <span id="movewrap" style="position:relative">
         <button class="btn icon" id="move-btn" onclick="toggleMoveMenu(event)" title="Move to folder…">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3A.75.75 0 0 1 2.5 2.25h3.879a.75.75 0 0 1 .53.22l1.122 1.122a.75.75 0 0 0 .53.22H13.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-.75.75H2.5a.75.75 0 0 1-.75-.75V3Zm1.5.75v7.75h10.5V4.5H8.56a2.25 2.25 0 0 1-1.591-.659L5.848 2.75H3.25Z"/></svg>
         </button>
         <div id="move-menu" class="dropdown-menu"></div>
       </span>
+      <!-- Delete. -->
       <button class="btn del icon" id="del-btn" onclick="deleteCurrentFile()" title="Delete this file">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.75 1.75 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15Z"/></svg>
       </button>
+      <!-- While editing: Format (JSON only), Save, Cancel. -->
       <button class="btn icon" id="format-json-btn" onclick="formatJSON()" title="Format JSON with 3-space indentation" aria-label="Format JSON" style="display:none">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 3.25A.75.75 0 0 1 2.5 2.5h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1-.75-.75Zm4 0a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm-4 4.75a.75.75 0 0 1 .75-.75h1a.75.75 0 0 1 0 1.5h-1A.75.75 0 0 1 1.75 8Zm4 0a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7A.75.75 0 0 1 5.75 8Zm-4 4.75A.75.75 0 0 1 2.5 12h1a.75.75 0 0 1 0 1.5h-1a.75.75 0 0 1-.75-.75Zm4 0A.75.75 0 0 1 6.5 12h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z"/></svg>
       </button>
@@ -572,20 +1176,26 @@
       </button>
     </div>
 
+    <!-- Placeholder (welcome or install screen) or the file viewer. -->
     <div id="scroll">
+      <!-- Title and subtitle change with the state: select a board, identifying, install. -->
       <div id="placeholder">
         <svg width="42" height="42" viewBox="0 0 16 16" fill="#8c959f"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 8.75 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>
         <p id="ph-title">Select a board</p>
         <small id="ph-sub">Connect a Raspberry Pi Pico or ESP32 board over USB and select it above</small>
+        <!-- Shown on the welcome screen only. -->
         <div class="welcome-content">
           <p><strong class="welcome-heading">Your next project starts here.</strong></p>
           <p>Connect a Raspberry Pi Pico or ESP32 board using a USB data cable.<br>
           It will appear in the top bar automatically.</p>
           <button class="btn primary" onclick="showReadme()">Getting started</button>
         </div>
+        <!-- Install options for BOOTSEL and ESP download-mode devices. -->
         <div id="bootsel-options"></div>
+        <!-- Where install firmware comes from, shown on install screens. -->
         <small id="bootsel-source">Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a></small>
       </div>
+      <!-- Code view, editor, Markdown preview, or binary notice for the open file. -->
       <div id="viewer">
         <div id="code"></div>
         <textarea id="editor" spellcheck="false"></textarea>
@@ -594,8 +1204,10 @@
       </div>
     </div>
 
+    <!-- Console drawer: live board output and a one-line Python input. -->
     <div id="console">
       <div id="console-resize" title="Drag to resize console"></div>
+      <!-- Header: click to open or close; Stop (Ctrl-C) and Clear buttons. -->
       <div id="conhead" onclick="toggleConsole()">
         <span class="chev" id="conchev">▶</span>
         <span class="t">Console</span>
@@ -607,6 +1219,7 @@
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12.75 1.25 7.1 8.9"/><path d="m5.65 7.85 2.9 2.15-2.05 4.5H1.25Z"/><path d="m3.05 11.7-.7 1.7M4.65 11.85l-.45 2.3M6.15 12.05l-.25 1.8"/></svg>
         </button>
       </div>
+      <!-- Output, then the >>> input line. -->
       <div id="conbody">
         <pre id="conout"></pre>
         <div id="conin-wrap">
@@ -618,13 +1231,17 @@
   </div>
 </div>
 
+<!-- Full-screen README view. -->
 <div id="readme-screen"><article id="readme-content"></article></div>
 
+<!-- Hidden pickers for uploads (files or a folder) and ZIP restore. -->
 <input type="file" id="fileinput" multiple style="display:none">
 <input type="file" id="folderinput" webkitdirectory directory multiple style="display:none">
 <input type="file" id="restoreinput" accept=".zip,application/zip" style="display:none">
+<!-- Toast messages and the shared hover tooltip. -->
 <div id="toast"></div>
 <div id="hover-tooltip" role="tooltip"></div>
+<!-- Shared confirm / prompt dialog (see showDialog). -->
 <dialog id="app-dialog">
   <form id="dialog-form">
     <h2 id="dialog-title"></h2>
@@ -638,6 +1255,7 @@
   </form>
 </dialog>
 
+<!-- "Install ctrlPi API" form: API key, agent name, WiFi SSID and password. -->
 <dialog id="ctrlpi-dialog">
   <style>
     #ctrlpi-dialog { width: min(420px, calc(100vw - 32px)); margin: auto; border: 1px solid #d0d7de; border-radius: 10px; background: #fff; box-shadow: 0 16px 48px rgba(31,35,40,0.25); padding: 0; color: #1f2328; }
@@ -674,6 +1292,7 @@
 </dialog>
 
 <script>
+  // Elements the script uses, looked up once.
   var pillsEl   = document.getElementById('pills');
   var listEl    = document.getElementById('filelist');
   var searchEl  = document.getElementById('search');
@@ -686,23 +1305,27 @@
   var bootselOptionsEl = document.getElementById('bootsel-options');
   var bootselSourceEl = document.getElementById('bootsel-source');
   var filenameEl = document.getElementById('filename');
+  // The viewer's four modes: code, Markdown, binary notice and editor.
   var codeEl    = document.getElementById('code');
   var mdEl      = document.getElementById('md');
   var binEl     = document.getElementById('binary');
   var editorEl  = document.getElementById('editor');
   var scrollEl  = document.getElementById('scroll');
   var dirtyEl   = document.getElementById('dirty');
+  // The console drawer's parts.
   var consoleEl = document.getElementById('console');
   var conOut    = document.getElementById('conout');
   var conIn     = document.getElementById('conin');
   var conChev   = document.getElementById('conchev');
   var consoleResize = document.getElementById('console-resize');
+  // Messages, tooltip, busy bar and the status banner.
   var toastEl   = document.getElementById('toast');
   var hoverTooltipEl = document.getElementById('hover-tooltip');
   var busyEl    = document.getElementById('busy');
   var connectionStatusEl = document.getElementById('connection-status');
   var connectionStatusMessageEl = document.getElementById('connection-status-message');
   var connectionStatusCloseEl = document.getElementById('connection-status-close');
+  // The shared dialog's parts.
   var appDialog = document.getElementById('app-dialog');
   var dialogForm = document.getElementById('dialog-form');
   var dialogTitle = document.getElementById('dialog-title');
@@ -711,6 +1334,7 @@
   var dialogCancel = document.getElementById('dialog-cancel');
   var dialogConfirm = document.getElementById('dialog-confirm');
   var dialogFooter = document.getElementById('dialog-footer');
+  // Hidden file pickers, menu toggles, and the main and README screens.
   var fileInput = document.getElementById('fileinput');
   var folderInput = document.getElementById('folderinput');
   var restoreInput = document.getElementById('restoreinput');
@@ -721,6 +1345,8 @@
   var readmeScreenEl = document.getElementById('readme-screen');
   var readmeContentEl = document.getElementById('readme-content');
 
+  // App state: the device list, the selected board and its files, the open file, the
+  // console stream, scan and install progress, warnings, dialog and console buffers.
   var devices = [];
   var curDev  = null;
   var allFiles = [];
@@ -736,8 +1362,10 @@
   var welcomeSelected = false;
   var activeBootselJobId = null;
   var activeEspJobId = null;
+  // null until the first answer; serverInstance changes when the server restarts.
   var serverConnected = null;
   var serverInstance = null;
+  // Warnings the user dismissed stay hidden until they change.
   var hostWarning = null;
   var hostWarningDismissed = false;
   var hostWarningDismissTimer = null;
@@ -753,6 +1381,8 @@
 
   // Shared tooltip for static and dynamic controls.
   var tooltipTarget = null;
+  // Shows the shared tooltip for an element's data-tooltip (or title, moved aside so the
+  // browser's own tooltip does not appear too).
   function showHoverTooltip(target) {
     var message = target.getAttribute('data-tooltip') || target.getAttribute('title');
     if (!message) return;
@@ -772,10 +1402,12 @@
     hoverTooltipEl.style.left = Math.round(left) + 'px';
     hoverTooltipEl.style.top = Math.max(8, Math.round(top)) + 'px';
   }
+  // Hides the shared tooltip.
   function hideHoverTooltip() {
     tooltipTarget = null;
     hoverTooltipEl.style.display = 'none';
   }
+  // The tooltip follows the pointer and keyboard focus; scrolling hides it.
   document.addEventListener('mouseover', function (e) {
     var target = e.target.closest('[title], [data-tooltip]');
     if (target && target !== tooltipTarget) showHoverTooltip(target);
@@ -790,27 +1422,33 @@
   document.addEventListener('focusout', hideHoverTooltip);
   window.addEventListener('scroll', hideHoverTooltip, true);
 
+  // Escapes text for safe use in HTML.
   function esc(s) {
     return String(s).replace(/[&<>"]/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
     });
   }
 
+  // A short message at the bottom of the screen; red when bad, green when good.
   function toast(msg, bad, duration, good) {
     toastEl.textContent = msg;
     toastEl.className = 'show' + (bad ? ' bad' : good ? ' good' : '');
     clearTimeout(toast._t);
+    // Errors stay 5 s, other messages 2.2 s, unless a duration is given.
     toast._t = setTimeout(function () { toastEl.className = ''; }, duration || (bad ? 5000 : 2200));
   }
 
+  // Shows the MCP toggle's state.
   function setMcpEnabled(enabled) {
     mcpEnabled = !!enabled;
     mcpToggleButton.classList.toggle('showing', !mcpEnabled);
     mcpToggleButton.setAttribute('aria-pressed', String(mcpEnabled));
   }
 
+  // Switches HTTP MCP on or off on the server, reverting the toggle if that fails.
   async function toggleMcp() {
     var enabled = !mcpEnabled;
+    // Show the new state at once; revert if the server refuses.
     setMcpEnabled(enabled);
     toast(enabled ? 'Enabling MCP' : 'Disabling MCP', !enabled, 3000, enabled);
     mcpToggleButton.disabled = true;
@@ -827,19 +1465,24 @@
     }
   }
 
+  // The shared modal dialog: title, message (text or HTML), optional input, and
+  // confirm/cancel buttons. Resolves with true/false, or the input's value.
   function showDialog(options) {
     dialogTitle.textContent = options.title || 'Confirm';
     if (options.messageHTML) dialogMessage.innerHTML = options.messageHTML;
     else dialogMessage.textContent = options.message || '';
+    // A `value` option makes it a prompt with a text input.
     dialogHasInput = Object.prototype.hasOwnProperty.call(options, 'value');
     dialogInput.classList.toggle('visible', dialogHasInput);
     dialogInput.value = dialogHasInput ? options.value : '';
     dialogConfirm.textContent = options.confirmLabel || 'OK';
+    // A dangerous action gets a red confirm button.
     dialogConfirm.className = 'btn ' + (options.danger ? 'dialog-danger' : 'primary');
     dialogFooter.innerHTML = options.footerHTML || '';
     dialogFooter.style.display = options.footerHTML ? '' : 'none';
     dialogCancel.style.display = options.cancel === false ? 'none' : '';
     appDialog.showModal();
+    // Focus the input, or Cancel when that should be the safe default, else Confirm.
     if (dialogHasInput) {
       dialogInput.focus();
       dialogInput.select();
@@ -851,21 +1494,25 @@
     return new Promise(function (resolve) { dialogResolve = resolve; });
   }
 
+  // Closes the dialog and resolves its promise.
   function finishDialog(confirmed) {
     if (!dialogResolve) return;
     var resolve = dialogResolve;
     dialogResolve = null;
+    // A prompt resolves with its text (null when cancelled), a confirm with true/false.
     var result = confirmed ? (dialogHasInput ? dialogInput.value : true) : (dialogHasInput ? null : false);
     appDialog.close();
     resolve(result);
   }
 
+  // A yes/no dialog.
   function confirmDialog(message, options) {
     options = options || {};
     options.message = message;
     return showDialog(options);
   }
 
+  // A dialog with a text input; resolves with the text, or null when cancelled.
   function promptDialog(message, value, options) {
     options = options || {};
     options.message = message;
@@ -873,6 +1520,8 @@
     return showDialog(options);
   }
 
+  // Enter confirms; Cancel, Escape and closing the dialog cancel. Copy buttons inside a
+  // message copy their command.
   dialogForm.addEventListener('submit', function (e) { e.preventDefault(); finishDialog(true); });
   dialogCancel.addEventListener('click', function () { finishDialog(false); });
   dialogMessage.addEventListener('click', function (e) {
@@ -881,7 +1530,10 @@
   });
   appDialog.addEventListener('cancel', function (e) { e.preventDefault(); finishDialog(false); });
 
+  // The banner at the top: server disconnected, Pi power warning, or a CIRCUITPY volume
+  // that needs mounting, in that order of priority.
   function updateStatusBanner() {
+    // Only one message shows; a dismissed warning stays hidden until it changes.
     var disconnected = !serverConnected;
     var warning = !disconnected && !hostWarningDismissed ? hostWarning : null;
     var unmounted = !disconnected && !warning && !mountWarningDismissed ? mountWarning : null;
@@ -898,10 +1550,13 @@
     } else connectionStatusMessageEl.textContent = '';
     connectionStatusEl.classList.toggle('visible', disconnected || !!warning || !!unmounted);
     connectionStatusEl.classList.toggle('mount-warning', !!unmounted);
+    // Warnings can be dismissed; a lost connection cannot.
     connectionStatusCloseEl.style.display = serverConnected && (warning || unmounted) ? 'block' : 'none';
   }
 
+  // Records the Pi power warning, showing it again when it changes.
   function setHostWarning(nextWarning) {
+    // A warning about past undervoltage (not current) hides itself after 10 s.
     var changed = (!hostWarning !== !nextWarning) || (hostWarning && nextWarning &&
       (hostWarning.code !== nextWarning.code || hostWarning.current !== nextWarning.current));
     if (changed) {
@@ -920,6 +1575,7 @@
     updateStatusBanner();
   }
 
+  // Records the mount command to show for an unmounted CIRCUITPY volume.
   function setMountWarning(command) {
     if (command !== mountWarning) mountWarningDismissed = false;
     mountWarning = command;
@@ -932,8 +1588,10 @@
     updateStatusBanner();
   });
 
+  // Tracks whether the server answers; reconnecting reloads the device list.
   function setServerConnected(connected) {
     if (connected === serverConnected) return;
+    // Losing the server disables the controls; getting it back re-enables them.
     var wasDisconnected = serverConnected === false;
     serverConnected = connected;
     updateStatusBanner();
@@ -945,6 +1603,7 @@
     }
   }
 
+  // fetch() that also tracks whether the server is reachable.
   async function serverFetch(path, opts) {
     try {
       var res = await fetch(path, opts);
@@ -956,6 +1615,7 @@
     }
   }
 
+  // Bytes as B, KB or MB.
   function humanSize(n) {
     if (n < 1024) return n + ' B';
     if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
@@ -964,9 +1624,10 @@
 
   // Hide timestamps from boards without a valid RTC.
   function whenText(secs) {
-    if (!secs || secs < 100000) return '—';
+    if (!secs || secs < 100000) return '-';
     var d = new Date(secs * 1000);
-    if (d.getFullYear() < 2001) return '—';
+    if (d.getFullYear() < 2001) return '-';
+    // "just now", then minutes, hours or days ago; after 30 days, the date.
     var diff = (Date.now() - d.getTime()) / 1000;
     if (diff < 60) return 'just now';
     if (diff < 3600) return Math.round(diff / 60) + 'm ago';
@@ -975,11 +1636,15 @@
     return d.toISOString().slice(0, 10);
   }
 
+  // Calls the JSON API for the current board (adding ?dev=), shows the busy indicator,
+  // and throws the server's error message on failure.
   async function api(path, opts, deviceOverride) {
     opts = opts || {};
     var requestDev = deviceOverride === undefined ? curDev : deviceOverride;
+    // The busy bar shows while any call is in flight.
     inflight++; busyEl.classList.add('on');
     try {
+      // Every board route takes ?dev=; a non-JSON answer (a download) is returned as is.
       var sep = path.indexOf('?') === -1 ? '?' : '&';
       var res = await serverFetch(path + sep + 'dev=' + encodeURIComponent(requestDev), opts);
       var ct = res.headers.get('content-type') || '';
@@ -1000,6 +1665,7 @@
     return devices.find(function (d) { return d.dev === curDev; }) || null;
   }
 
+  // What the selected board allows: writing, console input, running files.
   function canWrite() {
     var device = currentDevice();
     return !!device && device.ok && device.readOnly === false;
@@ -1015,6 +1681,7 @@
     return !!device && device.ok && device.capabilities && device.capabilities.run;
   }
 
+  // True when the board is writable; otherwise explains why not.
   function requireWriteAccess() {
     if (canWrite()) return true;
     var device = currentDevice();
@@ -1024,22 +1691,26 @@
     return false;
   }
 
+  // True when the board takes console input; otherwise says so.
   function requireConsoleAccess() {
     if (canUseConsole()) return true;
     toast('Console input is not available for this device', true);
     return false;
   }
 
+  // One pill per device, coloured by firmware; install-mode devices are red.
   function renderPills() {
     if (!devices.length) {
       pillsEl.innerHTML = '<span class="no-board">no board connected</span>';
       return;
     }
+    // A small chip icon shared by every pill.
     var picoIcon = '<svg class="pico-icon" viewBox="0 0 24 24" aria-hidden="true">' +
       '<rect x="6" y="6" width="12" height="12" rx="2"></rect>' +
       '<circle cx="9" cy="9" r="0.9" fill="currentColor" stroke="none"></circle>' +
       '<path d="M9 18v3M15 18v3M6 9H3M6 15H3M21 9h-3M21 15h-3"></path></svg>';
     pillsEl.innerHTML = devices.map(function (d) {
+      // The pill's tooltip: model, firmware, serial and read-only state, or the error.
       var details = d.bootMode
         ? d.bootloader === 'esp-rom' ? d.machine + ' · ROM download mode · ' + d.dev
           : 'BOOTSEL firmware-install mode. Reconnect the board normally to use pico-bay.'
@@ -1059,13 +1730,17 @@
     }).join('');
   }
 
+  // Spins the Scan button while a scan runs.
   function setScanning(scanning) {
     var refreshButton = document.getElementById('refresh-btn');
     refreshButton.classList.toggle('refreshing', scanning);
     refreshButton.disabled = scanning;
   }
 
+  // Polls the device list: keeps the selection when possible, follows install jobs, and
+  // updates the warnings. A manual Scan asks the server to identify boards again.
   async function loadDevices(manual) {
+    // One poll at a time; a manual Scan during a poll runs right after it.
     if (devicesLoading) {
       if (manual) manualScanPending = true;
       return;
@@ -1075,12 +1750,14 @@
       var res = await serverFetch('/api/devices' + (manual ? '?manual=1' : ''));
       if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
       var data = await res.json();
+      // A restarted server may serve a newer page: reload it.
       if (serverInstance && data.serverInstance !== serverInstance) { location.reload(); return; }
       serverInstance = data.serverInstance;
       usbAutomountSetupAvailable = !!data.usbAutomountSetupAvailable;
       document.getElementById('reset-pi-usb-btn').hidden = !data.raspberryPiHost;
       setMcpEnabled(data.mcpEnabled);
       setHostWarning(data.hostWarning || null);
+      // Re-render the pills only when the set of devices changed.
       var before = devices.map(function (d) { return d.dev; }).join(',');
       var previousDevice = currentDevice();
       devices = data.devices;
@@ -1089,6 +1766,7 @@
       setMountWarning(selectedDevice ? selectedDevice.mountCommand : null);
       setEnabled(!!curDev && !!currentDevice() && currentDevice().ok && !currentDevice().bootMode);
       var now = devices.map(function (d) { return d.dev; }).join(',');
+      // The selected board was unplugged.
       if (curDev && !devices.some(function (d) { return d.dev === curDev; })) {
         curDev = null; closeConsoleStream(); resetView();
         setEnabled(false);
@@ -1098,6 +1776,7 @@
         storageEl.classList.remove('visible');
       }
       if (before !== now) renderPills();
+      // Keep the welcome screen while the first boards are still being identified.
       if (!initialScanComplete) {
         if (devices.some(function (d) { return d.probing; }) && !devices.some(function (d) { return d.ok; })) {
           showWelcome();
@@ -1106,12 +1785,14 @@
         }
         initialScanComplete = true;
       }
+      // Re-select the board when its state changed (identified, failed, or new chip details).
       if (!welcomeSelected && previousDevice && selectedDevice &&
           (previousDevice.firmware !== selectedDevice.firmware || previousDevice.ok !== selectedDevice.ok || previousDevice.probing !== selectedDevice.probing ||
            (selectedDevice.bootMode && JSON.stringify(previousDevice.bootDetails) !== JSON.stringify(selectedDevice.bootDetails)))) {
         await selectDev(selectedDevice.dev);
       }
       if (!devices.length) showWelcome();
+      // With nothing selected, pick a running board, else a device in install mode.
       var firstUsable = devices.find(function (d) { return d.ok && !d.bootMode; }) || devices.find(function (d) { return d.bootMode; }) || devices[0];
       if (!welcomeSelected && !curDev && firstUsable) selectDev(firstUsable.dev);
       else renderPills();
@@ -1127,6 +1808,7 @@
     }
   }
 
+  // The Scan button.
   async function refreshDevices() {
     var button = document.getElementById('refresh-btn');
     if (button.classList.contains('refreshing')) return;
@@ -1136,6 +1818,7 @@
     try {
       await Promise.all([
         loadDevices(true),
+        // Keep the spinner visible for at least 350 ms so the click registers.
         new Promise(function (resolve) { setTimeout(resolve, 350); }),
       ]);
     } catch (e) {
@@ -1144,10 +1827,12 @@
     }
   }
 
+  // The start screen shown when no board is selected.
   async function showWelcome(userRequested) {
     if (userRequested && hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
       title: 'Discard changes?', confirmLabel: 'Discard', danger: true
     })) return;
+    // Chosen from the brand link: deselect the board as well.
     if (userRequested) {
       welcomeSelected = true;
       curDev = null;
@@ -1166,8 +1851,10 @@
     phSub.innerHTML = 'An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards<br>with MicroPython or CircuitPython over USB.';
   }
 
+  // Enables the toolbar and menu items the selected board supports.
   function setEnabled(on) {
     document.getElementById('menu-btn').disabled = false;
+    // Buttons need a selected board; write actions also need a writable one.
     document.querySelectorAll('.requires-device').forEach(function (el) { el.disabled = !on; });
     ['new-btn', 'new-folder-btn'].forEach(function (id) {
       var el = document.getElementById(id);
@@ -1176,6 +1863,7 @@
     document.querySelectorAll('.requires-write').forEach(function (el) {
       el.disabled = !on || !canWrite();
     });
+    // "Reboot to BOOTSEL" or "Enter download mode…", when the board supports one.
     var bootloaderButton = document.getElementById('bootloader-btn');
     var device = currentDevice();
     var canEnterBootloader = !!on && !!device && !!device.bootloaderMode;
@@ -1188,6 +1876,7 @@
     conIn.disabled = !on || !canUseConsole();
     conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
 
+    // "Install ctrlPi API" is offered on a Pico W or Pico 2 W only.
     var ctrlPiBtn = document.getElementById('ctrlpi-install-btn');
     if (ctrlPiBtn) {
       var isPicoW = device && device.machine && (device.machine.toLowerCase().includes('pico w') || device.machine.toLowerCase().includes('pico 2 w'));
@@ -1195,6 +1884,8 @@
     }
   }
 
+  // Selects a board: install-mode devices get their install screen, running boards
+  // their file list and console.
   async function selectDev(dev) {
     if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
       title: 'Discard changes?', confirmLabel: 'Discard', danger: true
@@ -1207,6 +1898,8 @@
     loadedSystemFiles = false;
     editing = false;
     renderPills();
+    // Still identifying, or failed: show why, with Rescan and (for an ESP32) a way into
+    // download mode.
     if (selectedDevice && !selectedDevice.ok) {
       closeConsoleStream();
       setEnabled(false);
@@ -1219,14 +1912,21 @@
         ? 'Checking ' + selectedDevice.dev + '. Other connected boards remain available.'
         : selectedDevice.error;
       if (!selectedDevice.probing) {
+        var isDownloadCandidate = (selectedDevice.error &&
+          /watchdog resets|download bootloader|ESP/i.test(selectedDevice.error)) ||
+          /ESP32/i.test(selectedDevice.machine || selectedDevice.label || '');
         bootselOptionsEl.classList.add('visible', 'mount-help');
         bootselOptionsEl.innerHTML = '<div class="recovery-steps">' +
           '<strong class="install-unavailable">Please unplug the board and plug it back in.</strong><br>' +
           'If it still fails, consider reinstalling the firmware.<br><br>' +
-          '</div><button class="btn" data-rescan>Rescan</button>';
+          '</div><div class="board-choices">' +
+          '<button class="btn" data-rescan>Rescan</button>' +
+          (isDownloadCandidate ? '<button class="btn primary" data-enter-download>Enter download mode</button>' : '') +
+          '</div>';
       }
       return;
     }
+    // A device in install mode gets the install screen instead of files.
     if (selectedDevice && selectedDevice.bootMode) {
       closeConsoleStream();
       setEnabled(false);
@@ -1234,6 +1934,8 @@
       mainEl.classList.add('bootsel-mode');
       listEl.innerHTML = '';
       storageEl.classList.remove('visible');
+      // ESP32 in download mode: chip and security details, the erase-storage option, and
+      // Install (or why it is unavailable).
       if (selectedDevice.bootloader === 'esp-rom') {
         phTitle.textContent = selectedDevice.label + ' download mode';
         phSub.textContent = 'Install the latest official MicroPython firmware, or reset the board to leave download mode.';
@@ -1251,7 +1953,9 @@
           ['Flash encryption', info.flashEncryption === undefined ? null : info.flashEncryption ? 'Enabled' : 'Disabled']
         ];
         var firmware = selectedDevice.installFirmware;
+        // An install already running (after a page reload) is followed rather than restarted.
         var installJob = selectedDevice.installJob;
+        // Install button with the erase option, or the reason installing is not possible.
         var installAction = firmware && info.installSupported
           ? '<div class="install-note">' + esc(firmware.build) +
             ' is the generic MicroPython build for this chip.</div>' +
@@ -1281,9 +1985,11 @@
         if (installJob) setTimeout(function () { monitorEspInstall(installJob.id); }, 0);
         return;
       }
+      // Pico in BOOTSEL: chip details and one button per model (with or without Wi-Fi).
       bootselSourceEl.innerHTML = 'Firmware is downloaded from <a href="https://micropython.org/download/" target="_blank" rel="noopener noreferrer">micropython.org/download/ ↗</a>';
       phTitle.textContent = selectedDevice.machine + ' BOOTSEL mode';
       phSub.textContent = 'Choose the board model to install the latest MicroPython firmware';
+      // RP2040 boards are a Pico or Pico W; RP2350 boards a Pico 2 or Pico 2 W.
       var choices = selectedDevice.machine === 'RP2040'
         ? [['pico', 'Raspberry Pi Pico', false], ['pico-w', 'Raspberry Pi Pico W', true]]
         : [['pico2', 'Raspberry Pi Pico 2', false], ['pico2-w', 'Raspberry Pi Pico 2 W', true]];
@@ -1306,6 +2012,7 @@
       if (bootselJob) setTimeout(function () { monitorBootselInstall(bootselJob.id); }, 0);
       return;
     }
+    // A running board: file list and live console.
     setEnabled(true);
     resetView();
     phTitle.textContent = 'Select a file';
@@ -1316,11 +2023,13 @@
     await loadFiles();
   }
 
+  // Clicking a pill selects that device.
   pillsEl.addEventListener('click', function (e) {
     var b = e.target.closest('.pill');
     if (b) selectDev(b.dataset.dev);
   });
 
+  // A definition list of the non-empty [label, value] rows.
   function renderBoardDetails(rows) {
     return '<dl class="boot-details">' + rows.filter(function (row) {
       return row[1] !== null && row[1] !== undefined && row[1] !== '';
@@ -1329,14 +2038,19 @@
     }).join('') + '</dl>';
   }
 
+  // The install screen's message, with "Keep the board connected." in bold.
   function setInstallMessage(message) {
     phSub.innerHTML = esc(message).replace('Keep the board connected.',
       '<strong class="install-warning">Keep the board connected.</strong>');
   }
 
+  // Copies text to the clipboard (with a fallback for non-secure pages) and confirms on
+  // the button.
   async function copyText(text, button) {
     try {
       var copied = false;
+      // The clipboard API needs a secure page; over plain HTTP from another computer, fall
+      // back to a hidden textarea and execCommand('copy').
       if (navigator.clipboard && window.isSecureContext) {
         try { await navigator.clipboard.writeText(text); copied = true; } catch (_) { /* Try the HTTP-compatible fallback. */ }
       }
@@ -1353,6 +2067,7 @@
         } finally { input.remove(); button.focus(); }
       }
       if (!copied) throw new Error('Clipboard unavailable');
+      // Show "Copied!" on the button for a moment, then restore its icon.
       if (!button.classList.contains('copied')) button.dataset.copyIcon = button.innerHTML;
       clearTimeout(button.copyFeedbackTimer);
       button.textContent = 'Copied!';
@@ -1369,8 +2084,10 @@
     } catch (error) { toast('Could not copy the command', true); }
   }
 
+  // Help for a Pi whose USB stopped after undervoltage: power-cycle the ports with uhubctl.
   function showPiUsbPowerHelp() {
     closeMenu();
+    // Power the Pi's USB ports off for 2 s and back on.
     var reset = 'sudo uhubctl -l 1-1 -a 0 ; sleep 2 ; sudo uhubctl -l 1-1 -a 1';
     var install = 'sudo apt update\nsudo apt install uhubctl';
     var block = function (value) {
@@ -1383,7 +2100,10 @@
       '<strong>If uhubctl is not installed, run:</strong>' + block(install) });
   }
 
+  // When the Pi needs permission to mount a BOOTSEL drive, shows the command and a
+  // Proceed button that retries the install.
   function showBootselMountHelp(error, firmwareId, firmwareName) {
+    // The server's error names the exact command.
     var match = /Run "([^"]+)" on the Pi/.exec(error.message);
     if (!match) return false;
     var command = match[1];
@@ -1400,6 +2120,7 @@
     return true;
   }
 
+  // The install screen's stage and percent for a BOOTSEL install.
   function renderBootselInstallProgress(job) {
     var labels = {
       queued: 'Starting', downloading: 'Downloading', validating: 'Validating',
@@ -1416,15 +2137,18 @@
       : 'Keep the board connected.');
   }
 
+  // Polls a BOOTSEL install job until it completes or fails.
   async function monitorBootselInstall(jobId) {
     if (!jobId || activeBootselJobId === jobId) return;
     activeBootselJobId = jobId;
     try {
+      // Poll every 150 ms until the job completes or fails, or another job takes over.
       while (activeBootselJobId === jobId) {
         var response = await serverFetch('/api/bootsel/install/status?id=' + encodeURIComponent(jobId));
         var job = await response.json();
         if (!response.ok || job.error) throw new Error(job.error || 'Could not read installation progress');
         if (activeBootselJobId !== jobId) return;
+        // A failure caused by a missing mount shows the mount help instead of an error.
         if (job.status === 'failed') throw new Error(job.error || 'BOOTSEL installation failed');
         if (job.status === 'complete') {
           activeBootselJobId = null;
@@ -1452,9 +2176,11 @@
     }
   }
 
+  // Starts a BOOTSEL install for the chosen Pico model, after confirming.
   async function installBootselChoice(firmwareId, firmwareName, confirmFirst) {
     var device = currentDevice();
     if (!device || !device.bootMode) return;
+    // Installing replaces the firmware, so confirm first (unless the user just did).
     if (confirmFirst) {
       var confirmed = await confirmDialog(
         'This will download the latest MicroPython firmware for ' + firmwareName +
@@ -1467,6 +2193,7 @@
     phTitle.textContent = 'Starting MicroPython installation…';
     setInstallMessage('Keep the board connected.');
     try {
+      // The server runs the install as a job; follow it until it ends.
       var job = await api('/api/bootsel/install?firmware=' + encodeURIComponent(firmwareId), {
         method: 'POST'
       });
@@ -1482,6 +2209,7 @@
     }
   }
 
+  // Shows why an ESP32 install failed and re-enables its button.
   function showEspInstallFailure(message) {
     phTitle.textContent = 'Installation failed';
     phSub.textContent = message;
@@ -1492,6 +2220,7 @@
     toast(message, true);
   }
 
+  // The install screen's stage and percent for an ESP32 install.
   function renderEspInstallProgress(job) {
     var labels = {
       queued: 'Starting', downloading: 'Downloading', validating: 'Validating',
@@ -1502,19 +2231,20 @@
     var button = bootselOptionsEl.querySelector('[data-esp-install]');
     if (button) {
       button.disabled = true;
-      button.textContent = job.stage === 'writing' ? job.percent + '%' : label + '…';
+      button.textContent = job.stage === 'writing' ? 'Writing firmware - ' + job.percent + '%' : label + '…';
     }
     var initializeOption = bootselOptionsEl.querySelector('[data-esp-initialize]');
     if (initializeOption) initializeOption.disabled = true;
     phTitle.textContent = label + ' MicroPython…';
-    setInstallMessage((job.stage === 'writing' ? 'Writing firmware — ' + job.percent + '%. ' : '') +
-      'Keep the board connected.');
+    setInstallMessage('Keep the board connected.');
   }
 
+  // Polls an ESP32 install job until it completes or fails.
   async function monitorEspInstall(jobId) {
     if (!jobId || activeEspJobId === jobId) return;
     activeEspJobId = jobId;
     try {
+      // Poll until the job completes or fails, or another job takes over.
       while (activeEspJobId === jobId) {
         var response = await serverFetch('/api/esp/install/status?id=' + encodeURIComponent(jobId));
         var job = await response.json();
@@ -1524,6 +2254,7 @@
         if (job.status === 'complete') {
           activeEspJobId = null;
           phTitle.textContent = 'MicroPython installed';
+          // A board the installer could not reset needs a manual reset to start MicroPython.
           phSub.textContent = job.result.rebooted === false
             ? job.result.firmware + ' was verified and installed. Reset the board to start MicroPython.'
             : job.result.firmware + ' was verified and installed. Waiting for the board to reconnect…';
@@ -1540,6 +2271,7 @@
     }
   }
 
+  // Starts an ESP32 install after confirming, with the erase-storage option.
   async function installEspDownload() {
     var device = currentDevice();
     if (!device || device.bootloader !== 'esp-rom' || !device.installFirmware) return;
@@ -1559,6 +2291,7 @@
     phTitle.textContent = 'Downloading and installing MicroPython…';
     setInstallMessage('Validating, writing, and verifying the firmware. Keep the board connected.');
     try {
+      // The server runs the install as a job; follow it until it ends.
       var job = await api('/api/esp/install?confirmed=1&initialize=' + (initializeStorage ? '1' : '0'), {
         method: 'POST'
       });
@@ -1569,7 +2302,10 @@
     }
   }
 
+  // Buttons on the install and recovery screens: Rescan, Enter download mode, copy a
+  // command, Install for ESP32, and the Pico model choices.
   bootselOptionsEl.addEventListener('click', async function (e) {
+    // Rescan from the identification-failed screen.
     var rescanButton = e.target.closest('[data-rescan]');
     if (rescanButton) {
       rescanButton.disabled = true;
@@ -1577,6 +2313,13 @@
       finally { rescanButton.disabled = false; }
       return;
     }
+    // Enter download mode from the identification-failed screen.
+    var enterDownloadBtn = e.target.closest('[data-enter-download]');
+    if (enterDownloadBtn) {
+      await enterEspDownloadFromFailure(enterDownloadBtn);
+      return;
+    }
+    // Copy a shown command, or start the ESP32 install.
     var copyButton = e.target.closest('[data-copy-command]');
     if (copyButton) { await copyText(copyButton.dataset.copyCommand, copyButton); return; }
     var espInstallButton = e.target.closest('[data-esp-install]');
@@ -1597,6 +2340,7 @@
     var requestedDev = curDev;
     try {
       var includeSystemFiles = !hideSystemFiles;
+      // Ignore the answer if another board was selected meanwhile.
       var data = await api('/api/files' + (includeSystemFiles ? '?system=1' : ''), {}, requestedDev);
       if (requestedDev !== curDev) return;
       allFiles = data.files;
@@ -1610,6 +2354,7 @@
     }
   }
 
+  // The top bar's firmware label with RAM and Flash usage bars.
   function renderStorage(s) {
     var device = currentDevice();
     var firmware = device && device.ok
@@ -1620,6 +2365,7 @@
       storageEl.classList.toggle('visible', !!firmware);
       return;
     }
+    // Usage as percentages for the bars, with used / total in their tooltips.
     var flashUsed = s.fsTotal - s.fsFree;
     var flashPct = s.fsTotal ? Math.round((flashUsed / s.fsTotal) * 100) : 0;
     var flashUsedText = humanSize(flashUsed);
@@ -1645,8 +2391,12 @@
     return false;
   }
 
+  // The file tree: filtered by the search box, folders collapsible, hidden files optional,
+  // with per-row actions and the drop-to-upload hint.
   function renderList() {
     var q = searchEl.value.trim().toLowerCase();
+    // Which rows show: hidden (dot) files only when asked for; a search lists matching
+    // files flat, otherwise folders fold.
     var uploadHint = canWrite() ? 'Drop files here to upload' : 'CircuitPython - READ-ONLY';
     var rows = allFiles;
     if (hideSystemFiles) rows = rows.filter(function (f) {
@@ -1661,6 +2411,7 @@
       return;
     }
 
+    // One row per entry, indented by depth, with size, date and (when writable) actions.
     listEl.innerHTML = rows.map(function (f) {
       var depth = q ? 0 : f.path.split('/').length - 1;
       var meta = f.isDir
@@ -1678,6 +2429,7 @@
             '<button class="del" title="Delete ' + (f.isDir ? 'folder' : 'file') + '" data-act="delete">' +
               '<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.75 1.75 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15Z"/></svg></button>' +
           '</span>';
+      // A read-only board gets no row actions.
       if (!canWrite()) acts = '';
       return '<div class="file' + (f.isDir ? ' dir' : '') + (f.path === (curFile && curFile.path) ? ' active' : '') +
         '" data-path="' + esc(f.path) + '" data-dir="' + (f.isDir ? '1' : '') + '"' +
@@ -1690,9 +2442,11 @@
     }).join('') + '<div id="upload-hint">' + uploadHint + '</div>';
   }
 
+  // Row clicks: an action button, fold or unfold a folder, or open a file.
   listEl.addEventListener('click', function (e) {
     var row = e.target.closest('.file');
     if (!row) return;
+    // A click on one of the row's action buttons.
     var act = e.target.closest('[data-act]');
     var p = row.dataset.path;
     if (act) {
@@ -1705,6 +2459,7 @@
       else downloadPath(p);
       return;
     }
+    // A folder row folds or unfolds; a file row opens.
     if (row.dataset.dir === '1') {
       collapsed[p] = !collapsed[p];
       renderList();
@@ -1713,6 +2468,7 @@
     }
   });
 
+  // The list filters as you type.
   searchEl.addEventListener('input', renderList);
 
   // ── Viewing ──
@@ -1735,6 +2491,7 @@
     mainEl.classList.remove('welcome-mode');
   }
 
+  // Opens a file in the viewer, after confirming unsaved edits are discarded.
   async function openFile(p) {
     if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
       title: 'Discard changes?', confirmLabel: 'Discard', danger: true
@@ -1744,18 +2501,21 @@
       curFile = data;
       editing = false;
       showFile();
+      // Highlight the opened file in the tree.
       document.querySelectorAll('.file').forEach(function (el) {
         el.classList.toggle('active', el.dataset.path === p);
       });
     } catch (e) { toast(e.message, true); }
   }
 
+  // Shows the open file: highlighted code, a Markdown preview, or a binary notice.
   function showFile() {
     var f = curFile;
     placeholder.style.display = 'none';
     viewer.style.display = 'flex';
     toolbar.classList.add('visible');
     dirtyEl.classList.remove('on');
+    // Folder path dimmed, file name in bold, then its size.
     filenameEl.innerHTML = (f.path.indexOf('/') !== -1
         ? esc(f.path.slice(0, f.path.lastIndexOf('/') + 1)) : '') +
       '<b>' + esc(f.path.split('/').pop()) + '</b> · ' + humanSize(f.size);
@@ -1778,9 +2538,10 @@
     binEl.style.display = 'none';
     editorEl.style.display = 'none';
 
+    // Binary: a download button. Markdown: a preview. Anything else: highlighted code.
     if (f.binary) {
       binEl.style.display = 'block';
-      binEl.innerHTML = 'Binary file — ' + humanSize(f.size) +
+      binEl.innerHTML = 'Binary file, ' + humanSize(f.size) +
         '<br><br><button class="btn icon" onclick="downloadFile()" title="Download to this computer" aria-label="Download to this computer">' +
         '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M7.47 10.78a.75.75 0 0 0 1.06 0l3.75-3.75a.75.75 0 0 0-1.06-1.06L8.75 8.44V1.75a.75.75 0 0 0-1.5 0v6.69L4.78 5.97a.75.75 0 0 0-1.06 1.06ZM1.75 11a.75.75 0 0 1 .75.75v1.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 13.25 15H2.75A1.75 1.75 0 0 1 1 13.25v-1.5a.75.75 0 0 1 .75-.75Z"/></svg></button>';
       return;
@@ -1798,13 +2559,17 @@
   // Render an escaped Markdown subset.
   function markdownInline(text) {
     var tokens = [];
+    // Code, images and links become placeholders first, so the escaping and emphasis
+    // passes below cannot touch them.
     function token(html) { tokens.push(html); return '\uE000' + (tokens.length - 1) + '\uE001'; }
+    // Only web, mail, anchor and relative links; anything else is shown as plain text.
     function safeHref(href) {
       return /^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(href) || /^[a-z0-9][a-z0-9._~\/-]*$/i.test(href);
     }
     text = text.replace(/`([^`]+)`/g, function (_m, code) {
       return token('<code>' + esc(code) + '</code>');
     });
+    // A linked image (a README badge), then plain images, then links.
     text = text.replace(/\[!\[([^\]]*)\]\((https:\/\/[^)]+)\)\]\(([^)]+)\)/gi, function (_m, alt, src, href) {
       var clean = href.trim();
       if (!safeHref(clean)) return alt;
@@ -1820,6 +2585,7 @@
       return token('<a href="' + esc(clean) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>');
     });
     text = esc(text)
+      // Bold, then italics.
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/__([^_]+)__/g, '<strong>$1</strong>')
       .replace(/\*([^*]+)\*/g, '<em>$1</em>')
@@ -1827,6 +2593,7 @@
     return text.replace(/\uE000(\d+)\uE001/g, function (_m, i) { return tokens[Number(i)]; });
   }
 
+  // Keeps an HTML table from Markdown only when it holds nothing but plain table markup.
   function safeMarkdownTable(source) {
     var parsed = new DOMParser().parseFromString(source, 'text/html');
     var table = parsed.body.firstElementChild;
@@ -1843,21 +2610,28 @@
     return table.outerHTML;
   }
 
+  // A small Markdown renderer: headings, lists, code fences, tables, quotes and inline
+  // formatting. Embedded HTML is escaped, never run.
   function renderMarkdown(text) {
     var lines = text.replace(/\r\n?/g, '\n').split('\n');
     var html = [], paragraph = [], list = null, fenced = false, fence = [];
+    // The cells of one table row.
     function tableCells(line) {
       var trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
       return trimmed.split('|').map(function (cell) { return cell.trim(); });
     }
+    // Emits the paragraph collected so far.
     function flushParagraph() {
       if (paragraph.length) html.push('<p>' + markdownInline(paragraph.join(' ')) + '</p>');
       paragraph = [];
     }
+    // Closes an open list.
     function closeList() {
       if (list) html.push('</' + list + '>');
       list = null;
     }
+    // One pass over the lines: code fences, HTML tables, pipe tables, headings, quotes,
+    // rules, lists and paragraphs.
     for (var lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       var line = lines[lineIndex];
       if (/^```/.test(line)) {
@@ -1868,6 +2642,7 @@
       }
       if (fenced) { fence.push(line); continue; }
       var m;
+      // An HTML table is kept only when safeMarkdownTable accepts it.
       if (/^<table(?:\s|>)/i.test(line.trim())) {
         flushParagraph(); closeList();
         var tableSource = [line];
@@ -1877,17 +2652,20 @@
         html.push(safeMarkdownTable(tableSource.join('\n')));
         continue;
       }
+      // A pipe table is a header row followed by a ---|--- separator row.
       var separatorCells = lineIndex + 1 < lines.length ? tableCells(lines[lineIndex + 1]) : [];
       if (line.includes('|') && separatorCells.length > 1 && separatorCells.every(function (cell) {
         return /^:?-{3,}:?$/.test(cell);
       })) {
         flushParagraph(); closeList();
         var headers = tableCells(line);
+        // The README's options table gets fixed column widths.
         var tableClass = headers[0] === 'Option' ? ' class="options-table"' : '';
         html.push('<table' + tableClass + '><thead><tr>' + headers.map(function (cell) {
           return '<th>' + markdownInline(cell) + '</th>';
         }).join('') + '</tr></thead><tbody>');
         lineIndex += 2;
+        // Body rows run until a blank line or a line without a pipe.
         while (lineIndex < lines.length && lines[lineIndex].trim() && lines[lineIndex].includes('|')) {
           html.push('<tr>' + tableCells(lines[lineIndex]).map(function (cell) {
             return '<td>' + markdownInline(cell) + '</td>';
@@ -1898,7 +2676,10 @@
         lineIndex--;
         continue;
       }
+      // A blank line ends the paragraph or list.
       if (!line.trim()) { flushParagraph(); closeList(); continue; }
+      // Headings, horizontal rules, block quotes, bullet and numbered lists; any other
+      // line joins the current paragraph.
       if ((m = /^(#{1,6})\s+(.+)$/.exec(line))) {
         flushParagraph(); closeList();
         html.push('<h' + m[1].length + '>' + markdownInline(m[2]) + '</h' + m[1].length + '>');
@@ -1918,15 +2699,18 @@
         closeList(); paragraph.push(line.trim());
       }
     }
+    // An unclosed code fence still shows its contents.
     if (fenced) html.push('<pre><code>' + esc(fence.join('\n')) + '</code></pre>');
     flushParagraph(); closeList();
     return html.join('');
   }
 
+  // Code with line numbers and highlighting by file type (JSON is pretty-printed).
   function renderCode(text, p) {
     if (/\.json$/i.test(p)) {
       try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* show as-is */ }
     }
+    // One grid row per line; an empty line keeps its height with a zero-width space.
     var lines = text.split('\n');
     codeEl.innerHTML = lines.map(function (line, i) {
       var rendered;
@@ -1936,6 +2720,7 @@
       return '<div class="code-row"><div class="line-no">' + (i + 1) +
         '</div><div class="line-src">' + (rendered || '&#8203;') + '</div></div>';
     }).join('');
+    // The gutter width follows the widest line number.
     var lineNumber = codeEl.querySelector('.line-no');
     codeEl.style.setProperty('--gutter-width', (lineNumber ? lineNumber.getBoundingClientRect().width : 0) + 'px');
   }
@@ -1944,6 +2729,7 @@
   var PY_KW = /\b(and|as|assert|async|await|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|nonlocal|not|or|pass|raise|return|try|while|with|yield|True|False|None|self)\b/g;
   var PY_SPLIT = /("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|#[^\n]*|@[A-Za-z_]\w*|\b\d+\.?\d*\b)/g;
 
+  // Python highlighting: keywords, strings, numbers, decorators and comments.
   function hlPython(src) {
     var out = '', last = 0, m;
     PY_SPLIT.lastIndex = 0;
@@ -1959,8 +2745,10 @@
     return out + esc(src.slice(last)).replace(PY_KW, '<span class="tok-kw">$1</span>');
   }
 
+  // JSON highlighting: keys, strings, numbers and literals.
   function hlJSON(src) {
     return esc(src)
+      // Runs on escaped text: a string followed by a colon is a key.
       .replace(/&quot;(\\.|[^&\\])*?&quot;(\s*:)?/g, function (s, _a, colon) {
         return '<span class="' + (colon ? 'tok-key' : 'tok-str') + '">' + s + '</span>';
       })
@@ -1973,10 +2761,12 @@
     return !!(editing && curFile && editorEl.value !== curFile.text);
   }
 
+  // Shows the unsaved-changes dot.
   function updateDirtyState() {
     dirtyEl.classList.toggle('on', hasUnsavedChanges());
   }
 
+  // Switches the viewer to the editor.
   function startEdit() {
     if (!requireWriteAccess()) return;
     if (!curFile || curFile.binary) return;
@@ -1987,6 +2777,7 @@
     codeEl.style.display = 'none';
     mdEl.style.display = 'none';
     editorEl.style.display = 'block';
+    // The editor fills the pane; only Save, Cancel (and Format for JSON) stay visible.
     editorEl.style.height = Math.max(scrollEl.clientHeight - 4, 300) + 'px';
     document.getElementById('run-btn').style.display = 'none';
     document.getElementById('download-btn').style.display = 'none';
@@ -2000,6 +2791,7 @@
     editorEl.focus();
   }
 
+  // Leaves the editor, after confirming unsaved edits are discarded.
   async function cancelEdit() {
     if (hasUnsavedChanges() && !await confirmDialog('Your unsaved edits will be lost.', {
       title: 'Discard changes?', confirmLabel: 'Discard', danger: true
@@ -2009,9 +2801,11 @@
     showFile();
   }
 
+  // Pretty-prints the JSON in the editor.
   function formatJSON() {
     if (!curFile || !/\.json$/i.test(curFile.path)) return;
     try {
+      // Re-indents with three spaces; invalid JSON is reported instead.
       editorEl.value = JSON.stringify(JSON.parse(editorEl.value), null, 3) + '\n';
       updateDirtyState();
       toast('JSON formatted with 3-space indentation');
@@ -2020,6 +2814,7 @@
     }
   }
 
+  // Saves the editor's text to the board.
   async function saveEdit() {
     if (!requireWriteAccess()) return;
     if (!curFile) return;
@@ -2030,6 +2825,7 @@
         headers: { 'Content-Type': 'application/octet-stream' },
         body: new Blob([text]),
       });
+      // The saved text becomes the file's content in the viewer.
       curFile.text = text;
       curFile.size = new Blob([text]).size;
       editing = false;
@@ -2041,6 +2837,7 @@
   }
 
   editorEl.addEventListener('input', updateDirtyState);
+  // Editor keys: Cmd/Ctrl-S saves, Escape cancels, Tab inserts four spaces.
   editorEl.addEventListener('keydown', function (e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); saveEdit(); }
     if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
@@ -2058,13 +2855,17 @@
     if (!curDev) return;
     window.location = '/api/zip?dev=' + encodeURIComponent(curDev);
   }
+  // Opens the file picker for a ZIP backup to restore.
   function pickRestore() {
     if (!curDev || !requireWriteAccess()) return;
     closeMenu();
     restoreInput.value = '';
     restoreInput.click();
   }
+  // Restores the picked ZIP after confirming: matching paths are overwritten, other files
+  // stay; an ESP32 without a filesystem is offered one first.
   restoreInput.addEventListener('change', async function () {
+    // Nothing to do when the picker was cancelled.
     var file = restoreInput.files && restoreInput.files[0];
     if (!file) return;
     if (!await confirmDialog('Existing files with matching paths will be overwritten. Other files will remain.', {
@@ -2086,14 +2887,17 @@
         'Restored ' + result.restored + ' file' + (result.restored === 1 ? '' : 's'));
     } catch (e) { toast('Restore failed: ' + e.message, true); }
   });
+  // Downloads one board file.
   function downloadPath(p) {
     window.location = '/api/file?download=1&path=' + encodeURIComponent(p) + '&dev=' + encodeURIComponent(curDev);
   }
+  // Toolbar shortcuts for the open file.
   function downloadFile() { if (curFile) downloadPath(curFile.path); }
   function deleteCurrentFile() { if (curFile) deletePath(curFile.path, false); }
 
   var moveMenuEl = document.getElementById('move-menu');
 
+  // The "Move to" menu of folders for the open file.
   function toggleMoveMenu(e) {
     if (e) e.stopPropagation();
     if (!curFile) return;
@@ -2105,17 +2909,20 @@
     moveMenuEl.classList.add('open');
   }
 
+  // Closes the "Move to" menu.
   function closeMoveMenu() {
     if (moveMenuEl) moveMenuEl.classList.remove('open');
   }
 
   document.addEventListener('click', closeMoveMenu);
 
+  // Lists every folder the open file can move to.
   function renderMoveMenu() {
     if (!curFile) return;
     var curDir = curFile.path.indexOf('/') !== -1 ? curFile.path.slice(0, curFile.path.lastIndexOf('/')) : '';
     var dirs = allFiles.filter(function (f) { return f.isDir; });
     var html = '';
+    // The root, every folder (the current one ticked), and "New folder…".
     html += '<button data-target-dir="">' + (curDir === '' ? '✓ ' : '') + '/ (root)</button>';
     dirs.forEach(function (d) {
       var isCurrent = curDir === d.path;
@@ -2125,6 +2932,7 @@
     moveMenuEl.innerHTML = html;
   }
 
+  // A folder in the menu moves the open file there.
   moveMenuEl.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-target-dir]');
     if (!btn) return;
@@ -2133,6 +2941,7 @@
     else moveCurrentFileTo(targetDir);
   });
 
+  // Moves the open file into a folder.
   async function moveCurrentFileTo(targetDir) {
     if (!requireWriteAccess()) return;
     closeMoveMenu();
@@ -2150,12 +2959,14 @@
     } catch (e) { toast('Move failed: ' + e.message, true); }
   }
 
+  // Moves the open file into a folder created for it.
   async function moveCurrentFileToNewFolder() {
     if (!requireWriteAccess()) return;
     closeMoveMenu();
     if (!curFile) return;
     var folderName = await promptDialog('Enter a name for the new folder.', '', { title: 'New folder', confirmLabel: 'Create' });
     if (!folderName) return;
+    // Create the folder, then move the file into it.
     var cleanFolder = folderName.replace(/^[/]+|[/]+$/g, '');
     if (!cleanFolder) return;
     try {
@@ -2167,11 +2978,13 @@
     } catch (e) { toast('Could not create folder: ' + e.message, true); }
   }
 
+  // Renames the open file.
   async function renameCurrentFile() {
     if (!requireWriteAccess()) return;
     if (!curFile) return;
     var oldPath = curFile.path;
     var oldName = oldPath.split('/').pop();
+    // Renaming keeps the file in its folder.
     var dir = oldPath.indexOf('/') !== -1 ? oldPath.slice(0, oldPath.lastIndexOf('/')) : '';
     var newName = await promptDialog('Enter a new name for this file.', oldName, { title: 'Rename file', confirmLabel: 'Rename' });
     if (!newName || newName === oldName) return;
@@ -2185,6 +2998,7 @@
     } catch (e) { toast('Rename failed: ' + e.message, true); }
   }
 
+  // Deletes a file or folder, after confirming.
   async function deletePath(p, isDir) {
     if (!requireWriteAccess()) return;
     var msg = isDir
@@ -2196,15 +3010,18 @@
     try {
       await api('/api/file?path=' + encodeURIComponent(p), { method: 'DELETE' });
       toast('Deleted ' + p);
+      // Close the viewer if the open file was deleted (or was inside the deleted folder).
       if (curFile && (curFile.path === p || curFile.path.indexOf(p + '/') === 0)) resetView();
       loadFiles();
     } catch (e) { toast('Delete failed: ' + e.message, true); }
   }
 
+  // Runs a write; when an ESP32 has no filesystem yet, offers to create one and retries.
   async function withEspStorageRecovery(operation) {
     try {
       return { result: await operation(), initialized: false, cancelled: false };
     } catch (e) {
+      // ENODEV (errno 19) means the ESP32 has no filesystem yet.
       if (!/(?:Errno 19|ENODEV)/i.test(e.message)) throw e;
       var confirmed = await confirmDialog(
         'This ESP32 storage is not initialized. Initializing it will erase any files currently in its VFS partition.',
@@ -2216,6 +3033,7 @@
     }
   }
 
+  // Creates a file (a path may include folders).
   async function newFile(parentDir) {
     if (!requireWriteAccess()) return;
     var name = await promptDialog('You may include a folder, for example scripts/blink.py.', '', {
@@ -2236,8 +3054,10 @@
     }
   }
 
+  // Creates a folder.
   async function newFolder(parentDir) {
     if (!requireWriteAccess()) return;
+    // A name typed inside a folder's row is created in that folder.
     var name = await promptDialog('Enter a name for the new folder.', '', { title: 'New folder', confirmLabel: 'Create' });
     if (!name) return;
     name = parentDir ? parentDir + '/' + name.replace(/^[/]+/, '') : name;
@@ -2252,8 +3072,10 @@
     catch (e) { toast('Could not create: ' + e.message, true); }
   }
 
+  // Renames or moves any path.
   async function renamePath(p) {
     if (!requireWriteAccess()) return;
+    // A new full path, so this both renames and moves.
     var to = await promptDialog('Enter the new path.', p, { title: 'Move or rename', confirmLabel: 'Save' });
     if (!to || to === p) return;
     try {
@@ -2268,24 +3090,30 @@
     } catch (e) { toast('Rename failed: ' + e.message, true); }
   }
 
+  // Keep the editor filling the pane when the window is resized.
   window.addEventListener('resize', function () {
     if (editing) editorEl.style.height = Math.max(scrollEl.clientHeight - 4, 300) + 'px';
   });
 
   // ── Upload & Drag/Drop ──
+  // Menu items open the hidden file or folder picker; picking uploads to the board root.
   function pickUpload() { if (requireWriteAccess()) { fileInput.value = ''; fileInput.click(); } }
   function pickUploadFolder() { if (requireWriteAccess()) { folderInput.value = ''; folderInput.click(); } }
   fileInput.addEventListener('change', function () { uploadFiles(fileInput.files); });
   folderInput.addEventListener('change', function () { uploadFiles(folderInput.files, '', true); });
 
+  // True when a drag carries files from the computer.
   function isFileDrag(e) {
     return e.dataTransfer && Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1;
   }
 
+  // Uploads dropped or picked files, asking before overwriting; a folder upload keeps
+  // its structure.
   async function uploadFiles(files, targetDir, preserveRelativePaths) {
     if (!curDev || !files || !files.length || !requireWriteAccess()) return;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
+      // A folder upload keeps paths inside the chosen folder, without the folder itself.
       var relativePath = preserveRelativePaths && f.webkitRelativePath ? f.webkitRelativePath : f.name;
       if (preserveRelativePaths && relativePath.indexOf('/') !== -1) {
         relativePath = relativePath.slice(relativePath.indexOf('/') + 1);
@@ -2296,6 +3124,7 @@
         title: 'Overwrite file?', confirmLabel: 'Overwrite', danger: true
       })) continue;
       try {
+        // Each file is one PUT; an ESP32 without a filesystem is offered one first.
         var uploaded = await withEspStorageRecovery(function () {
           return api('/api/file?path=' + encodeURIComponent(path), {
             method: 'PUT',
@@ -2313,6 +3142,7 @@
     loadFiles();
   }
 
+  // Dragging a row: drop on a folder to move it, or drag it out to the desktop to download.
   var draggedPath = null;
   listEl.addEventListener('dragstart', function (e) {
     var row = e.target.closest('.file');
@@ -2324,13 +3154,16 @@
       var fileName = filePath.split('/').pop().replace(/[\r\n:]/g, '_');
       var downloadUrl = new URL('/api/file?download=1&path=' + encodeURIComponent(filePath) +
         '&dev=' + encodeURIComponent(curDev), window.location.href).href;
+      // Chrome downloads a row dragged to the desktop through DownloadURL.
       e.dataTransfer.setData('DownloadURL', 'application/octet-stream:' + fileName + ':' + downloadUrl);
       e.dataTransfer.setData('text/uri-list', downloadUrl);
       e.dataTransfer.effectAllowed = 'copyMove';
     }
   });
+  // A drag that ends anywhere else is forgotten.
   listEl.addEventListener('dragend', function () { draggedPath = null; });
 
+  // Highlight the folder (or the whole list) a drop would land in.
   ['dragenter', 'dragover'].forEach(function (ev) {
     listEl.addEventListener(ev, function (e) {
       if (!curDev) return;
@@ -2348,6 +3181,7 @@
     });
   });
 
+  // Clear the highlight when the drag leaves or drops.
   ['dragleave', 'drop'].forEach(function (ev) {
     listEl.addEventListener(ev, function (e) {
       e.preventDefault();
@@ -2356,6 +3190,8 @@
     });
   });
 
+  // Files from the computer are uploaded into the folder under the cursor; a row
+  // dropped on a folder is moved there.
   listEl.addEventListener('drop', async function (e) {
     if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
       if (!requireWriteAccess()) return;
@@ -2366,6 +3202,7 @@
     if (!draggedPath) return;
     var row = e.target.closest('.file.dir');
     var targetDir = row ? row.dataset.path : '';
+    // Moving keeps the file name; dropping it where it already is does nothing.
     var baseName = draggedPath.split('/').pop();
     var to = targetDir ? targetDir + '/' + baseName : baseName;
     if (to === draggedPath) return;
@@ -2386,23 +3223,27 @@
     if (!curDev) return;
     try {
       await api('/api/reset' + (hard ? '?hard=1' : ''), { method: 'POST' });
-      toast(hard ? 'Hard reset sent' : 'Board reset — program restarted');
+      toast(hard ? 'Hard reset sent' : 'Board reset, program restarted');
+      // A hard reset drops the board off USB: rescan once it has had time to return.
       if (hard) { setTimeout(loadDevices, 2500); }
       else loadFiles();
     } catch (e) { toast('Reset failed: ' + e.message, true); }
   }
 
+  // Ctrl-C.
   async function doInterrupt() {
     if (!curDev) return;
     try { await api('/api/interrupt', { method: 'POST' }); } catch (e) { toast(e.message, true); }
   }
 
+  // Runs the open file and shows its output in the console.
   async function runFile() {
     if (!curFile) return;
     if (!canRunFiles()) { toast('Running files is not available for this device', true); return; }
     openConsole(true);
     try {
       var r = await api('/api/run?path=' + encodeURIComponent(curFile.path), { method: 'POST', body: '' });
+      // Output normally arrives through the console stream; add it only if it did not.
       if (r && r.out && conOut.textContent.indexOf(r.out.trim()) === -1) {
         conWrite('out', r.out);
       }
@@ -2412,6 +3253,7 @@
     } catch (e) { toast('Run failed: ' + e.message, true); }
   }
 
+  // Deletes every file on the board, after an explicit confirmation.
   async function doClean() {
     if (!requireWriteAccess()) return;
     closeMenu();
@@ -2426,7 +3268,9 @@
     } catch (e) { toast('Clean failed: ' + e.message, true); }
   }
 
+  // After "Reboot to BOOTSEL", polls once a second, up to 15 s, for the drive to appear.
   async function waitForBootsel() {
+    // A drive can take several seconds to mount after the reboot.
     for (var attempt = 0; attempt < 15; attempt++) {
       await loadDevices(false);
       var found = devices.find(function (candidate) {
@@ -2438,11 +3282,14 @@
     return null;
   }
 
+  // Sends the board to BOOTSEL or ESP download mode, after confirming; shows manual steps
+  // when an ESP32 cannot be reset automatically.
   async function doBootloader() {
     if (!curDev || bootloaderPending) return;
     closeMenu();
     var device = currentDevice();
     if (!device || !device.bootloaderMode) return;
+    // ESP32 boards go to download mode, Picos to BOOTSEL.
     var esp = device.bootloaderMode === 'download';
     var targetDev = curDev;
     var mode = esp ? 'download mode' : 'BOOTSEL mode';
@@ -2451,15 +3298,16 @@
       if (!await confirmDialog('The board will restart in ' + mode + ' for firmware installation. To cancel afterward, unplug the USB cable and plug it back in without holding any buttons, before starting an installation.', {
         title: 'Enter ' + mode + '?', confirmLabel: 'Enter ' + mode, danger: true
       })) return;
+      // An ESP32 the server could not reset into download mode gets manual instructions.
       var result = await api('/api/bootloader', { method: 'POST' }, targetDev);
       if (esp && result.manual) {
         await confirmDialog('', {
           title: 'Enter download mode manually', confirmLabel: 'Got it', cancel: false,
           messageHTML: '<p style="margin-bottom:26px"><span style="color:#cf222e">Automatic download mode did not succeed.</span><br>Choose either option:</p>' +
-            '<p><strong>Option 1 — Use RESET / EN</strong><br>' +
+            '<p><strong>Option 1: Use RESET / EN</strong><br>' +
             'Hold <strong>BOOT</strong>, then press and release <strong>RESET / EN</strong>.<br>' +
             'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
-            '<p style="margin-top:22px"><strong>Option 2 — Reconnect USB</strong><br>' +
+            '<p style="margin-top:22px"><strong>Option 2: Reconnect USB</strong><br>' +
             'Unplug the USB cable. Hold <strong>BOOT</strong> and plug USB back in.<br>' +
             'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
             '<p style="margin-top:26px">To cancel, unplug USB and plug it back in without holding any buttons.</p>'
@@ -2470,6 +3318,7 @@
         toast('Entering download mode…');
         setTimeout(function () { loadDevices(false); }, 250);
       } else {
+        // A Pico reappears as a BOOTSEL drive; select it once found.
         toast('BOOTSEL requested. Waiting for the board to appear…', false, 20000);
         var bootsel = await waitForBootsel();
         if (bootsel) {
@@ -2488,11 +3337,47 @@
     finally { bootloaderPending = false; }
   }
 
+  // Tries download mode again from a failed identification.
+  async function enterEspDownloadFromFailure(btn) {
+    if (!curDev || bootloaderPending) return;
+    var targetDev = curDev;
+    bootloaderPending = true;
+    if (btn) btn.disabled = true;
+    try {
+      toast('Entering download mode…');
+      // The same manual instructions when the automatic reset does not reach the ROM.
+      var result = await api('/api/bootloader?mode=download', { method: 'POST' }, targetDev);
+      if (result.manual) {
+        await confirmDialog('', {
+          title: 'Enter download mode manually', confirmLabel: 'Got it', cancel: false,
+          messageHTML: '<p style="margin-bottom:26px"><span style="color:#cf222e">Automatic download mode did not succeed.</span><br>Choose either option:</p>' +
+            '<p><strong>Option 1: Use RESET / EN</strong><br>' +
+            'Hold <strong>BOOT</strong>, then press and release <strong>RESET / EN</strong>.<br>' +
+            'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
+            '<p style="margin-top:22px"><strong>Option 2: Reconnect USB</strong><br>' +
+            'Unplug the USB cable. Hold <strong>BOOT</strong> and plug USB back in.<br>' +
+            'Keep holding BOOT for <strong>3 seconds</strong>, then release.</p>' +
+            '<p style="margin-top:26px">To cancel, unplug USB and plug it back in without holding any buttons.</p>'
+        });
+        await refreshDevices();
+        return;
+      }
+      toast('Entering download mode…');
+      await refreshDevices();
+    } catch (e) {
+      toast('Could not enter download mode: ' + e.message, true);
+    } finally {
+      bootloaderPending = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
   // ── Menu ──
   async function toggleSystemFiles() {
     hideSystemFiles = !hideSystemFiles;
     hideSystemFilesButton.classList.toggle('showing', !hideSystemFiles);
     hideSystemFilesButton.setAttribute('aria-pressed', hideSystemFiles ? 'true' : 'false');
+    // Hidden files are fetched the first time they are shown.
     if (!hideSystemFiles && !loadedSystemFiles) {
       listEl.innerHTML = '<div id="empty">Loading system files…</div>';
       await loadFiles();
@@ -2500,12 +3385,14 @@
       renderList();
     }
   }
+  // Leaves the full-screen README.
   function exitReadme() {
     if (!readmeScreenEl || readmeScreenEl.style.display === 'none') return;
     readmeScreenEl.style.display = 'none';
     mainScreenEl.style.display = 'flex';
     document.title = curFile ? 'Pico Bay - ' + curFile.path.split('/').pop() : 'Pico Bay';
   }
+  // Shows the README full screen.
   async function showReadme() {
     try {
       var response = await serverFetch('/api/readme');
@@ -2519,6 +3406,7 @@
       toast('Could not open README.md: ' + e.message, true);
     }
   }
+  // The About dialog.
   function showAbout() {
     showDialog({
       title: 'About Pico Bay',
@@ -2534,33 +3422,71 @@
       cancel: false
     });
   }
+  // ── Theme (Dark / Bright mode) ──
+  function toggleTheme() {
+    var isDark = document.body.classList.toggle('dark-mode');
+    document.documentElement.classList.toggle('dark-mode', isDark);
+    try {
+      // Remembered under both keys the ctrlPi pages use.
+      localStorage.setItem('ctrlpi-theme', isDark ? 'dark' : 'light');
+      localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    } catch (e) {}
+  }
+
+  // Applies the saved theme, or the system's dark/light preference.
+  function initTheme() {
+    try {
+      var saved = localStorage.getItem('ctrlpi-theme') || localStorage.getItem('theme');
+      var isDark = saved === 'dark' || (!saved && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.body.classList.toggle('dark-mode', isDark);
+      document.documentElement.classList.toggle('dark-mode', isDark);
+    } catch (e) {}
+  }
+
+  if (window.matchMedia) {
+    // Follow the system theme while the user has not picked one.
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function (e) {
+      if (!localStorage.getItem('ctrlpi-theme') && !localStorage.getItem('theme')) {
+        document.body.classList.toggle('dark-mode', e.matches);
+        document.documentElement.classList.toggle('dark-mode', e.matches);
+      }
+    });
+  }
+
   function toggleMenu(e) { e.stopPropagation(); menuEl.classList.toggle('open'); }
   function closeMenu() { menuEl.classList.remove('open'); }
+  // A click anywhere closes the menu; a click on an item also runs it.
   document.addEventListener('click', closeMenu);
   menuEl.addEventListener('click', function (e) { e.stopPropagation(); closeMenu(); });
 
   // ── Console ──
   function toggleConsole() { consoleEl.classList.toggle('open'); conChev.textContent = consoleEl.classList.contains('open') ? '▼' : '▶'; }
+  // Collapses the console.
   function closeConsole() {
     consoleEl.classList.remove('open');
     conChev.textContent = '▶';
   }
   function scrollConsoleBottom() { conOut.scrollTop = conOut.scrollHeight; }
+  // Opens the console, optionally scrolled to the end.
   function openConsole(scrollToBottom) {
     if (!consoleEl.classList.contains('open')) toggleConsole();
     if (scrollToBottom) requestAnimationFrame(scrollConsoleBottom);
   }
   function clearConsole() { conOut.textContent = ''; consoleControlBuffer = ''; }
 
+  // Strips CircuitPython's terminal title and status sequences from console output,
+  // keeping an incomplete sequence for the next chunk.
   function cleanConsoleText(text) {
     var input = consoleControlBuffer + String(text);
     var output = '';
     consoleControlBuffer = '';
+    // Copy plain characters; skip ESC [ ... (CSI) and ESC ] ... (OSC) sequences.
     for (var i = 0; i < input.length;) {
       if (input.charCodeAt(i) !== 27) {
         output += input[i++];
         continue;
       }
+      // A sequence cut off at the end of this chunk waits for the next one.
       if (i + 1 >= input.length) { consoleControlBuffer = input.slice(i); break; }
       var kind = input[i + 1];
       if (kind === '[') {
@@ -2570,6 +3496,7 @@
         i = csiEnd + 1;
       } else if (kind === ']') {
         var oscEnd = i + 2;
+        // OSC ends with BEL or ESC \.
         while (oscEnd < input.length && input.charCodeAt(oscEnd) !== 7 &&
                !(input.charCodeAt(oscEnd) === 27 && input[oscEnd + 1] === '\\')) oscEnd++;
         if (oscEnd >= input.length) { consoleControlBuffer = input.slice(i); break; }
@@ -2581,37 +3508,47 @@
     return output;
   }
 
+  // Appends console output, coloured by type, keeping the view at the bottom.
   function conWrite(type, text) {
     var device = currentDevice();
+    // CircuitPython writes terminal title and status updates into its output.
     if (type === 'out' && device && device.firmware === 'circuitpython') text = cleanConsoleText(text);
     if (!text) return;
+    // Errors red, system messages grey, program output plain.
     var span = document.createElement('span');
     if (type === 'err') span.className = 'e';
     if (type === 'sys') span.className = 's';
     span.textContent = text;
     conOut.appendChild(span);
+    // Keep at most 800 chunks of output.
     while (conOut.childNodes.length > 800) conOut.removeChild(conOut.firstChild);
     conOut.scrollTop = conOut.scrollHeight;
   }
 
+  // Connects the console to the board's output stream.
   function openConsoleStream() {
     closeConsoleStream();
     if (!curDev) return;
     evtSource = new EventSource('/api/console?dev=' + encodeURIComponent(curDev));
+    // Each event is { type: 'out' | 'err' | 'sys', text }.
     evtSource.onmessage = function (e) {
       var m = JSON.parse(e.data);
       conWrite(m.type, m.text);
     };
+    // EventSource reconnects by itself after an error.
     evtSource.onerror = function () { /* EventSource retries on its own */ };
   }
+  // Disconnects the console stream.
   function closeConsoleStream() {
     consoleControlBuffer = '';
     if (evtSource) { evtSource.close(); evtSource = null; }
   }
 
+  // Enter runs the console line on the board.
   conIn.addEventListener('keydown', async function (e) {
     if (e.key !== 'Enter') return;
     if (!requireConsoleAccess()) return;
+    // Errors go to the console; the line is cleared once sent.
     var code = conIn.value;
     if (!code.trim() || !curDev) return;
     conIn.value = '';
@@ -2622,12 +3559,14 @@
   // ── Drag to resize the console ──
   consoleResize.addEventListener('pointerdown', function (e) {
     e.preventDefault();
+    // Pointer capture keeps the drag going outside the handle.
     consoleResize.setPointerCapture(e.pointerId);
     consoleResize.classList.add('dragging');
     document.body.style.userSelect = 'none';
     document.body.style.cursor = 'row-resize';
     function onMove(ev) {
       var rect = document.getElementById('right').getBoundingClientRect();
+      // Console height between 110 px and the pane height minus 100 px.
       var h = Math.max(110, Math.min(rect.bottom - ev.clientY, rect.height - 100));
       consoleEl.style.setProperty('--console-height', h + 'px');
     }
@@ -2649,6 +3588,7 @@
   var dragbar = document.getElementById('dragbar');
   var sidebarEl = document.getElementById('sidebar');
   var mainEl = document.getElementById('main');
+  // Drag the bar to set the sidebar width.
   dragbar.addEventListener('mousedown', function (e) {
     e.preventDefault();
     dragbar.classList.add('dragging');
@@ -2656,6 +3596,7 @@
     document.body.style.cursor = 'col-resize';
     function onMove(ev) {
       var rect = mainEl.getBoundingClientRect();
+      // Sidebar width between 180 px and the window width minus 220 px.
       var w = Math.max(180, Math.min(ev.clientX - rect.left, rect.width - 220));
       sidebarEl.style.flex = '0 0 ' + w + 'px';
     }
@@ -2670,14 +3611,18 @@
     document.addEventListener('mouseup', onUp);
   });
 
+  // Warn before leaving the page with unsaved edits.
   window.addEventListener('beforeunload', function (e) {
     if (hasUnsavedChanges()) { e.preventDefault(); e.returnValue = ''; }
   });
 
+  // Start: theme, welcome screen, first scan, then a device poll every 3 s.
+  initTheme();
   setEnabled(false);
   showWelcome();
   refreshDevices();
   setInterval(loadDevices, 3000);   // hot-plug: pills appear and vanish on their own
+  // Opens "Install ctrlPi API", filled from the board's config.json and wifi.txt.
   async function openCtrlPiDialog() {
     closeMenu();
     if (!curDev) return;
@@ -2687,6 +3632,7 @@
     var ssidInput = document.getElementById('ctrlpi-ssid');
     var passInput = document.getElementById('ctrlpi-pass');
     
+    // Defaults, replaced by the board's own config.json and wifi.txt when present.
     keyInput.value = 'your-secret-key';
     nameInput.value = '';
     ssidInput.value = '';
@@ -2704,6 +3650,7 @@
       } catch (e) {}
     }
     
+    // wifi.txt holds "SSID = ..." and "PASSWORD = ..." lines.
     var hasWifi = allFiles.some(function(f) { return f.path === '/wifi.txt' || f.path === 'wifi.txt'; });
     if (hasWifi) {
       try {
@@ -2726,6 +3673,7 @@
     document.getElementById('ctrlpi-dialog').showModal();
   }
 
+  // Sends the form to the server, which merges it into the board's files and resets it.
   document.getElementById('ctrlpi-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     document.getElementById('ctrlpi-dialog').close();

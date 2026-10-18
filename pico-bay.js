@@ -9,6 +9,7 @@ process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '12';
 const http = require('http');
 const https = require('https');
 const fs   = require('fs');
+const net  = require('net');
 const os   = require('os');
 const path = require('path');
 const readline = require('readline');
@@ -16,8 +17,11 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { execFile, execFileSync, spawn } = require('child_process');
 
+// Node has no serial API on Windows: combridge.cs is compiled once per version into a
+// helper exe (cached in the temp folder) that opens COM ports for us.
 let winSerialHelperPath = null;
 if (process.platform === 'win32') {
+  // The .NET Framework 4 compiler ships with Windows, in Framework64 or Framework.
   const csc = ['C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe', 'C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe'].find(fs.existsSync);
   if (!csc) {
     console.error('Error: Could not find C# compiler (csc.exe) for native Windows serial communication.');
@@ -45,6 +49,7 @@ Options:
   --port PORT         Web server port
   --host ADDRESS      Web server address
   --hold MILLISECONDS Board release delay
+  --allow-host NAME   Also accept requests addressed to this host name
   --no-open           Do not open a browser
   --mcp-stdio         Run MCP over stdio
   --mcp-http          Enable MCP over HTTP
@@ -53,17 +58,21 @@ Options:
   --version           Show the version`);
   process.exit(0);
 }
+// Command-line flags; each falls back to its PICO_* environment variable, then the default.
 let portArg = null;
 let holdArg = null;
 let hostArg = null;
+const allowHostArgs = [];
 let noOpen = envEnabled(process.env.PICO_NO_OPEN);
 let cliMcpStdio = false;
 let cliMcpHttp = false;
 let cliNoMcp = envEnabled(process.env.PICO_NO_MCP);
+// Flags that take a value read the next argument.
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') portArg = args[++i];
   else if (args[i] === '--hold') holdArg = args[++i];
   else if (args[i] === '--host') hostArg = args[++i];
+  else if (args[i] === '--allow-host') allowHostArgs.push(args[++i]);
   else if (args[i] === '--no-open') noOpen = true;
   else if (args[i] === '--mcp-stdio') cliMcpStdio = true;
   else if (args[i] === '--mcp-http') cliMcpHttp = true;
@@ -71,8 +80,34 @@ for (let i = 0; i < args.length; i++) {
 }
 const PORT = parseInt(portArg || process.env.PICO_PORT || '7426', 10);
 const RASPBERRY_PI_HOST = isRaspberryPi();
+// Loopback by default; a Pi listens on the LAN so another computer can open the UI.
 const HOST = hostArg || process.env.PICO_HOST || (RASPBERRY_PI_HOST ? '0.0.0.0' : '127.0.0.1');
+// Extra host names the web server answers to (comma-separated or repeated); the --host
+// name is one of them, so a server started on a name can be opened by that name.
+const ALLOW_HOSTS = hostList([...allowHostArgs, process.env.PICO_ALLOW_HOSTS, HOST]);
 
+// Lower-cased host names from comma-separated values.
+function hostList(values) {
+  return values.flatMap(value => String(value || '').split(','))
+    .map(name => name.trim().toLowerCase().replace(/\.$/, ''))
+    .filter(Boolean);
+}
+
+// Against DNS rebinding: a page on another domain can point its name at this machine,
+// but the browser still sends that name in Host. Only IP addresses, localhost, this
+// machine's own name (and <name>.local) and the --allow-host names get through.
+function hostAllowed(hostHeader, extra = [], hostname = os.hostname()) {
+  const match = /^(?:\[([0-9a-f:.]+)\]|([a-z0-9.-]+))(?::\d+)?$/i.exec(String(hostHeader || ''));
+  if (!match) return false;
+  const name = (match[1] || match[2]).toLowerCase().replace(/\.$/, '');
+  if (net.isIP(name) || name === 'localhost') return true;
+  const own = String(hostname || '').toLowerCase().replace(/\.local$/, '');
+  if (own && (name === own || name === own + '.local')) return true;
+  return extra.includes(name);
+}
+
+// Which MCP transports run: command-line flags win over the environment, --no-mcp turns
+// both off, and a Raspberry Pi gets HTTP MCP unless stdio was chosen.
 function selectMcpTransports(options) {
   if (options.noMcp) return { stdio: false, http: false };
   const cliTransport = options.cliStdio || options.cliHttp;
@@ -89,14 +124,18 @@ const selectedMcp = selectMcpTransports({
 });
 const mcpStdio = selectedMcp.stdio;
 const mcpHttp = selectedMcp.http;
+// --no-mcp together with an MCP flag is reported at startup.
 const conflictingMcpFlags = cliNoMcp && (cliMcpStdio || cliMcpHttp);
 
 // Delay before leaving raw REPL and restarting main.py. Zero resets immediately.
 const HOLD_MS = parseInt(holdArg || process.env.PICO_HOLD_MS || '900', 10);
 const README = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
 const LICENSE = fs.readFileSync(path.join(__dirname, 'LICENSE'), 'utf8');
+// Changes on every start, so an open page can tell the server restarted.
 const SERVER_INSTANCE = process.pid + '-' + Date.now();
+// The optional Pi automount script is offered in the UI only when it was shipped.
 const USB_AUTOMOUNT_SETUP_AVAILABLE = fs.existsSync(path.join(__dirname, 'usb-automount.sh'));
+// The whole frontend, served from memory with the version filled in.
 const PAGE = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8')
   .split('{{VERSION}}').join(VERSION);
 
@@ -104,6 +143,7 @@ const PAGE = fs.readFileSync(path.join(__dirname, 'page.html'), 'utf8')
 const DEV_DIR = '/dev';
 const STTY_FLAG = process.platform === 'darwin' ? '-f' : '-F';
 
+// Promise helpers: a delay, and execFile resolving with its stdout.
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const execFileText = (file, argv, options = {}) => new Promise((resolve, reject) => {
   execFile(file, argv, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, ...options }, (error, stdout) => {
@@ -112,6 +152,11 @@ const execFileText = (file, argv, options = {}) => new Promise((resolve, reject)
   });
 });
 
+// Python helper that toggles DTR/RTS on the already-open serial descriptor (fd 3) to
+// reset an ESP32 or put it in download mode; Node cannot set modem lines itself. Each
+// mode is one sequence: a plain reset ('normal', 'usb-normal'), or download-mode entry
+// for native USB-Serial/JTAG, classic auto-reset circuits and the default timing
+// ('-slow' variants wait longer).
 const ESP_DTR_RTS_RESET = String.raw`
 import fcntl, os, struct, sys, termios, time
 # Inherit the parent's open serial descriptor; opening the device again can
@@ -195,6 +240,7 @@ else:
 os.close(fd)
 `;
 
+// Runs ESP_DTR_RTS_RESET on the open descriptor; killed after 3 s if it hangs.
 function resetEspLines(fd, mode) {
   return new Promise((resolve, reject) => {
     const child = spawn('python3', ['-c', ESP_DTR_RTS_RESET, mode], {
@@ -212,14 +258,19 @@ function resetEspLines(fd, mode) {
   });
 }
 
+// The same DTR/RTS sequences on Windows, sent to combridge over its control pipe.
 async function winResetEspLines(winPort, mode) {
   if (!winPort || !winPort.winPortControl) throw new Error('Serial control pipe is unavailable');
+  // combridge takes "dtr:0|1" and "rts:0|1" lines on its control pipe; the sequences
+  // match the Python helper's, one per mode.
   const delay = mode.endsWith('-slow') ? 550 : 50;
+  // Sets both lines in one control message.
   const set = (dtr, rts) => new Promise((resolve, reject) => {
     const control = winPort.winPortControl;
     if (!control || control.destroyed) return reject(new Error('Serial control pipe is unavailable'));
     control.write(`dtr:${dtr ? '1' : '0'}\nrts:${rts ? '1' : '0'}\n`, error => error ? reject(error) : resolve());
   });
+  // Plain resets for native USB and USB-UART boards, then the download-mode entries.
   if (mode === 'usb-normal') {
     await set(false, true); await sleep(200);
     await set(false, false); await sleep(200);
@@ -244,6 +295,7 @@ async function winResetEspLines(winPort, mode) {
   }
 }
 
+// True on a Raspberry Pi: Linux with "Raspberry Pi" in the device-tree model.
 function isRaspberryPi(platform = process.platform, model = null) {
   if (platform !== 'linux') return false;
   if (model === null) {
@@ -253,10 +305,13 @@ function isRaspberryPi(platform = process.platform, model = null) {
   return /raspberry pi/i.test(String(model));
 }
 
+// A browser opens at startup unless disabled, or on a Pi, which usually has no screen.
 function shouldOpenBrowser(disabled, raspberryPiHost) {
   return !disabled && !raspberryPiHost;
 }
 
+// Turns `vcgencmd get_throttled` output into a warning when undervoltage was seen (bit 0
+// now, bit 16 since boot); null when the power is fine.
 function parseRaspberryPiThrottle(output) {
   const match = /throttled=0x([0-9a-f]+)/i.exec(String(output || ''));
   if (!match) return null;
@@ -269,6 +324,7 @@ function parseRaspberryPiThrottle(output) {
   };
 }
 
+// The Pi power warning, checked at most every 10 s.
 let powerWarningCache = { checked: 0, value: null };
 function raspberryPiPowerWarning(now = Date.now()) {
   if (!RASPBERRY_PI_HOST) return null;
@@ -291,6 +347,7 @@ const RAW_BANNER = 'raw REPL; CTRL-B to exit\r\n>';
 
 // Owns one serial conversation and serializes all board operations.
 class PicoPort {
+  // State for one serial device; the port opens lazily on the first command.
   constructor(dev) {
     this.dev = dev;
     this.deviceIdentity = deviceIdentity(dev);
@@ -313,12 +370,15 @@ class PicoPort {
   }
 
   // ── Port lifecycle ──
+  // Waits for a previous close to finish before the device is reopened.
   async _waitForClose(timeout = 1500) {
     const deadline = Date.now() + timeout;
     while (this.closing && Date.now() < deadline) await sleep(20);
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
   }
 
+  // Opens the device: through combridge on Windows (data on stdio, DTR/RTS over a named
+  // pipe), elsewhere as a raw tty set up with stty. Starts the reader.
   async _open() {
     if (this.fd !== null || this.winPort !== null) return;
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
@@ -326,6 +386,7 @@ class PicoPort {
       this.connectionGeneration++;
       if (process.platform === 'win32') {
         const generation = this.connectionGeneration;
+        // combridge connects back to a random named pipe, which carries DTR/RTS commands.
         this.winPortPipeBase = 'picobay_' + crypto.randomBytes(8).toString('hex');
         this.winPortPipe = '\\\\.\\pipe\\' + this.winPortPipeBase;
         const srv = require('net').createServer();
@@ -335,10 +396,11 @@ class PicoPort {
             clearTimeout(timer);
             if (generation === this.connectionGeneration) {
               this._disconnected();
-              this._emit('sys', '— board disconnected —\n');
+              this._emit('sys', '[board disconnected]\n');
             }
             reject(error);
           };
+          // combridge must connect to the pipe within 5 s.
           const timer = setTimeout(() => fail(new Error('Serial control pipe timed out')), 5000);
           srv.on('error', fail);
           srv.on('connection', control => {
@@ -351,6 +413,7 @@ class PicoPort {
           });
           try {
             srv.listen(this.winPortPipe);
+            // Serial data flows over the helper's stdin and stdout.
             const child = spawn(winSerialHelperPath, [this.dev.replace(/^\\\\?\\\\.\\/, ''), '115200', this.winPortPipeBase], { stdio: ['pipe', 'pipe', 'inherit'] });
             this.winPort = child;
             child.on('error', fail);
@@ -365,6 +428,7 @@ class PicoPort {
         return;
       }
 
+      // macOS and Linux open the tty directly.
       this.fd = fs.openSync(this.dev, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
       // Return reads after 100 ms instead of blocking indefinitely.
       execFileSync('stty', [STTY_FLAG, this.dev, 'raw', '-echo', '115200', 'min', '0', 'time', '1'], {
@@ -379,6 +443,7 @@ class PicoPort {
     this._pump();
   }
 
+  // Closes the device without blocking the event loop.
   _close() {
     if (this.winPortServer) {
       this.winPortServer.close();
@@ -408,6 +473,7 @@ class PicoPort {
     fs.close(fd, () => { this.closing = false; });
   }
 
+  // Forgets everything learned about the board and fails any read in progress.
   _disconnected() {
     const capture = this.capture;
     this.capture = null;
@@ -437,7 +503,7 @@ class PicoPort {
           if (e.code === 'EAGAIN' || e.code === 'EINTR') { await sleep(20); continue; }
           // Drop disconnected descriptors before the next command.
           this._disconnected();
-          this._emit('sys', '— board disconnected —\n');
+          this._emit('sys', '[board disconnected]\n');
           break;
         }
         if (generation === this.connectionGeneration && n > 0) this._onData(buf.subarray(0, n).toString('binary'));
@@ -447,6 +513,7 @@ class PicoPort {
     }
   }
 
+  // Bytes go to the running command, or to console subscribers when idle.
   _onData(chunk) {
     if (this.inCommand) { this.rx += chunk; this._check(); return; }
     this._emit('out', chunk);
@@ -475,6 +542,7 @@ class PicoPort {
     cap.resolve(taken);
   }
 
+  // Sends console text ('out' or 'sys') to every subscriber.
   _emit(type, text) {
     for (const m of this.monitors) { try { m(type, text); } catch { /* client gone */ } }
   }
@@ -505,6 +573,7 @@ class PicoPort {
     }
   }
 
+  // Waits for a token (needle) or a byte count (want) in the receive buffer.
   _read(spec, timeoutMs, onChunk) {
     if (this.capture) return Promise.reject(new Error('read already in flight'));
     return new Promise((resolve, reject) => {
@@ -522,10 +591,12 @@ class PicoPort {
     });
   }
 
+  // Resolves with everything up to and including `needle`.
   readUntil(needle, timeoutMs = 10000, onChunk = null) {
     return this._read({ needle }, timeoutMs, onChunk);
   }
 
+  // Resolves with exactly `want` bytes.
   readN(want, timeoutMs = 5000) {
     return this._read({ want }, timeoutMs, null);
   }
@@ -536,6 +607,7 @@ class PicoPort {
     let lastErr;
     do {
       try {
+        // Leave any raw REPL, interrupt the program twice, then enter the raw REPL.
         await this.write('\r' + CTRL_B);
         await sleep(50);
         await this.write('\r' + CTRL_C);
@@ -573,6 +645,7 @@ class PicoPort {
       return false;
     }
     const ws = await this.readN(2, 3000);
+    // The board grants a window of bytes; each \x01 it sends adds another window.
     const windowSize = ws.charCodeAt(0) | (ws.charCodeAt(1) << 8);
     let remain = windowSize;
     const buf = Buffer.from(code + CTRL_D, 'binary');
@@ -589,10 +662,12 @@ class PicoPort {
       i += n;
       remain -= n;
     }
+    // Wait for the board to confirm it has the whole block before reading its reply.
     await this.readUntil('\x04', 10000);   // end-of-data acknowledgement
     return true;
   }
 
+  // Removes and returns the first buffered byte.
   _takeByte() {
     const b = this.rx[0];
     this.rx = this.rx.slice(1);
@@ -616,6 +691,7 @@ class PicoPort {
         await sleep(1);
       }
     }
+    // The reply is stdout, \x04, stderr, \x04> (plain raw mode adds a leading OK); only stdout is streamed.
     let acc = '', seen = 0;
     const res = await this.readUntil('\x04>', timeout, onChunk && ((chunk) => {
       // Forward stdout only.
@@ -634,6 +710,7 @@ class PicoPort {
 
   // Serialize work and debounce release by HOLD_MS.
   command(fn, { rawRepl = true } = {}) {
+    // Opens the port, enters the raw REPL once, runs fn, then holds or releases the board.
     const run = async () => {
       this._cancelIdle();
       this.busy = true;
@@ -660,15 +737,18 @@ class PicoPort {
         else await this._release();
       }
     };
+    // Runs after everything queued before it, whether that succeeded or failed.
     const next = this.chain.then(run, run);
     this.chain = next.catch(() => {});
     return next;
   }
 
+  // Stops a pending release.
   _cancelIdle() {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
   }
 
+  // Releases the board HOLD_MS after the last command, unless another one arrives first.
   _scheduleIdle() {
     this._cancelIdle();
     this.idleTimer = setTimeout(() => {
@@ -693,17 +773,20 @@ class PicoPort {
     if (this.monitors.size === 0) this._close();
   }
 
+  // Releases the board once queued work is done, even an ESP32 held in download mode.
   releaseNow() {
     const next = this.chain.then(() => this._release(true), () => this._release(true));
     this.chain = next.catch(() => {});
     return next;
   }
 
+  // Subscribes a console client; the port stays open while any are attached.
   async addMonitor(fn) {
     await this._waitForClose();
     await this._open();
     this.monitors.add(fn);
   }
+  // Unsubscribes, and closes the port when nothing else needs it.
   removeMonitor(fn) {
     this.monitors.delete(fn);
     if (this.monitors.size === 0 && !this.busy && !this.halted && this.info?.bootloader !== 'esp-rom' &&
@@ -716,6 +799,8 @@ const ports = new Map(); // dev path -> PicoPort
 const espInstalls = new Set(); // serial paths with an active firmware installation
 let deviceListOverride = null; // test seam; null always in normal CLI use
 
+// What each firmware supports and how to hard-reset it. CircuitPython counts as
+// read-only until a writable route (serial or a mounted volume) is found.
 const FIRMWARE_ADAPTERS = {
   micropython: {
     id: 'micropython', label: 'MicroPython', readOnly: false, console: true, run: true,
@@ -731,16 +816,19 @@ const FIRMWARE_ADAPTERS = {
   },
 };
 
+// The adapter for a firmware name, or the 'unknown' one.
 function firmwareAdapter(name) {
   return FIRMWARE_ADAPTERS[name] || FIRMWARE_ADAPTERS.unknown;
 }
 
+// Strips terminal escape codes (titles, colours) from REPL output.
 function cleanReplOutput(text) {
   return String(text)
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
+// Collects the PVI_* values a probe printed into { impl, machine, release, uid }.
 function parseProbeOutput(out) {
   const values = {};
   for (const line of cleanReplOutput(out).split(/\r?\n/)) {
@@ -750,10 +838,13 @@ function parseProbeOutput(out) {
   return values;
 }
 
+// Serial devices that can be boards: COM ports from the Windows registry (Bluetooth
+// excluded), cu.usbmodem / cu.usbserial on macOS, ttyACM / ttyUSB on Linux.
 function listDevs(platform = process.platform) {
   if (deviceListOverride) return [...deviceListOverride];
   if (platform === 'win32') {
     try {
+      // Windows: every COM port in the registry, Bluetooth ports excluded.
       const reg = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'reg.exe') : 'reg';
       const out = execFileSync(reg, ['query', 'HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM'], {
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
@@ -767,6 +858,7 @@ function listDevs(platform = process.platform) {
       return ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     } catch { return []; }
   }
+  // macOS and Linux: USB serial devices in /dev.
   const devMatch = platform === 'darwin'
     ? /^cu\.(usbmodem|usbserial)/
     : /^(ttyACM|ttyUSB)/;
@@ -778,6 +870,8 @@ function listDevs(platform = process.platform) {
   } catch { return []; }
 }
 
+// Identifies the physical device behind a path (inode and device number), so a board
+// unplugged and replaced on the same path is treated as a new one.
 function deviceIdentity(dev) {
   try {
     const stat = fs.statSync(dev);
@@ -787,6 +881,7 @@ function deviceIdentity(dev) {
   }
 }
 
+// The PicoPort for a device path, created on first use.
 function getPort(dev) {
   if (!ports.has(dev)) ports.set(dev, new PicoPort(dev));
   return ports.get(dev);
@@ -795,6 +890,7 @@ function getPort(dev) {
 // Espressif ROM serial protocol. Detection uses only read-only commands; the
 // flash commands below are reached only by an explicitly confirmed install.
 // https://docs.espressif.com/projects/esptool/en/latest/esp32/advanced-topics/serial-protocol.html
+// SLIP framing used by the ROM: 0xC0 delimits a frame, 0xDB escapes 0xC0 and 0xDB.
 function espSlipEncode(bytes) {
   const out = [0xc0];
   for (const byte of bytes) {
@@ -806,6 +902,7 @@ function espSlipEncode(bytes) {
   return Buffer.from(out);
 }
 
+// Undoes espSlipEncode for one frame without its delimiters.
 function espSlipDecode(bytes) {
   const out = [];
   for (let i = 0; i < bytes.length; i++) {
@@ -820,8 +917,11 @@ function espSlipDecode(bytes) {
   return Buffer.from(out);
 }
 
+// The ROM commands this file may send: flash, memory, sync, register reads, MD5, security info.
 const ESP_ROM_COMMANDS = new Set([0x02, 0x03, 0x04, 0x08, 0x0a, 0x0b, 0x0d, 0x10, 0x11, 0x12, 0x13, 0x14]);
 
+// Sends one ROM command and waits for its reply frame, skipping boot log noise. Returns
+// { value, data }, or throws with the ROM's error code.
 async function espRomCommand(port, opcode, data = Buffer.alloc(0), timeout = 700, checksum = 0) {
   if (!ESP_ROM_COMMANDS.has(opcode)) throw new Error('Unsupported ESP ROM command');
   const request = Buffer.alloc(8 + data.length);
@@ -844,6 +944,7 @@ async function espRomCommand(port, opcode, data = Buffer.alloc(0), timeout = 700
       }
       throw error;
     }
+    // Skip frames that are not a well-formed reply to this command.
     if (frame.length > 4096) throw new Error('Oversized ESP response');
     let reply;
     try { reply = espSlipDecode(Buffer.from(frame.slice(0, -1), 'binary')); }
@@ -851,6 +952,7 @@ async function espRomCommand(port, opcode, data = Buffer.alloc(0), timeout = 700
     if (reply.length < 10 || reply[0] !== 1 || reply[1] !== opcode) continue;
     const size = reply.readUInt16LE(2);
     if (reply.length !== 8 + size || size < 2) continue;
+    // The status sits in the last 2 or 4 bytes; a nonzero first byte is a ROM error.
     const statusSize = size === 2 ? 2 : 4;
     if (reply[reply.length - statusSize] !== 0 || reply[reply.length - statusSize + 1] !== 0) {
       const code = reply[reply.length - statusSize + 1];
@@ -862,8 +964,12 @@ async function espRomCommand(port, opcode, data = Buffer.alloc(0), timeout = 700
   throw new Error('No matching ESP ROM response');
 }
 
+// Recognises an ESP32 in ROM download mode with read-only commands only: SYNC, then the
+// chip from security info or the magic register, its MAC and its security state.
+// Returns a device record for the red DOWNLOAD pill, or null when no ROM answers.
 async function detectEspBootloader(port) {
   port.rx = '';
+  // The SYNC payload: 07 07 12 20 followed by 32 bytes of 0x55.
   const sync = Buffer.concat([Buffer.from([7, 7, 18, 32]), Buffer.alloc(32, 0x55)]);
   let synced = false;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -886,6 +992,8 @@ async function detectEspBootloader(port) {
     return (await espRomCommand(port, 0x0a, data)).value;
   };
   try {
+    // GET_SECURITY_INFO: secure boot, secure download and flash encryption, plus the chip
+    // id on newer chips.
     const { data } = await espRomCommand(port, 0x14);
     if (data.length === 12 || data.length === 20) {
       const flags = data.readUInt32LE(0);
@@ -902,6 +1010,7 @@ async function detectEspBootloader(port) {
   } catch { /* Older ROMs do not implement GET_SECURITY_INFO. */ }
   if (!chip && details.chipId === undefined) {
     try {
+      // Chips without a chip id are identified by the magic value at 0x40001000.
       const magic = await readReg(0x40001000);
       details.magic = '0x' + magic.toString(16).padStart(8, '0');
       chip = ({ [0x00f01d83]: 'ESP32', [0x000007c6]: 'ESP32-S2' })[magic] || null;
@@ -909,6 +1018,7 @@ async function detectEspBootloader(port) {
   }
   if (chip === 'ESP32') {
     try {
+      // Classic ESP32: the MAC address from eFuse.
       const low = await readReg(0x3ff5a004);
       const high = await readReg(0x3ff5a008);
       const mac = Buffer.alloc(6);
@@ -917,6 +1027,7 @@ async function detectEspBootloader(port) {
       details.mac = [...mac].map(byte => byte.toString(16).padStart(2, '0')).join(':');
     } catch { /* Keep the confirmed chip even if optional identity is unavailable. */ }
     try {
+      // Classic ESP32: flash encryption count and secure boot from eFuse.
       const security0 = await readReg(0x3ff5a000);
       const security6 = await readReg(0x3ff5a018);
       const cryptCount = (security0 >>> 20) & 0x7f;
@@ -926,6 +1037,7 @@ async function detectEspBootloader(port) {
       details.securityChecked = true;
     } catch { /* Security registers are best-effort during identification. */ }
   }
+  // Install only on an identified chip whose security state is known and unlocked.
   details.installSupported = !!chip && !!details.securityChecked && !details.secureDownload &&
     !details.secureBoot && !details.flashEncryption;
   const installFirmware = espFirmwareForChip(chip);
@@ -946,6 +1058,7 @@ async function detectEspBootloader(port) {
 
 // Accept complete probe markers even when auto-reload prevents the final prompt.
 async function probeRecord(port, key, code, attempts = 4) {
+  // The value is read from its PVI_<key> marker anywhere in the output.
   const marker = key === 'IMPL'
     ? /PVI_IMPL\s*(micropython|circuitpython)/
     : new RegExp('PVI_' + key + '\\s+([^\\r\\n\\x04\\x1b"\\\\]*)');
@@ -962,6 +1075,8 @@ async function probeRecord(port, key, code, attempts = 4) {
     }
     const found = marker.exec(cleanReplOutput(text));
     if (found && found[1].trim()) return found[1].trim();
+    // No firmware answered the first try: check for ESP download mode, then explain the
+    // common failure (blank flash, watchdog reset loop) before giving up.
     if (key === 'IMPL' && attempt === 0 && port instanceof PicoPort) {
       const boot = await port.command(async active => {
         const found = await detectEspBootloader(active);
@@ -974,6 +1089,7 @@ async function probeRecord(port, key, code, attempts = 4) {
           'Hold BOOT, press and release RESET/EN, keep holding BOOT for 3 seconds, then release and Scan. ' +
           'If there is no RESET button, reconnect USB while holding BOOT and keep holding for 3 seconds.');
       }
+      // Watchdog reset messages repeating mean the flashed program crashes on boot.
       const resetLoop = /RTCWDT_RTC_RESET|TG0WDT_SYS_RESET|TG1WDT_SYS_RESET/.test(text);
       if (resetLoop) {
         throw new Error('Board reports watchdog resets during flash boot and does not respond to MicroPython or the download bootloader.');
@@ -988,7 +1104,11 @@ async function probeRecord(port, key, code, attempts = 4) {
   throw new Error('board did not report ' + key.toLowerCase());
 }
 
+// One probe for machine, release, UID and writability (hex-encoded so nothing breaks
+// the marker parsing). Retries while startup code is still running.
 async function probeDetails(port, firmware, attempts = 6) {
+  // One line of board code printing everything; CircuitPython also reports whether its
+  // filesystem is writable from the board.
   const code = firmware === 'circuitpython'
     ? "import os,binascii,microcontroller,storage;u=os.uname();print('PVI_DETAILS',binascii.hexlify(u.machine.encode()).decode(),u.release,binascii.hexlify(microcontroller.cpu.uid).decode(),0 if storage.getmount('/').readonly else 1)"
     : "import os,binascii,machine;u=os.uname();print('PVI_DETAILS',binascii.hexlify(u.machine.encode()).decode(),u.release,binascii.hexlify(machine.unique_id()).decode(),1)";
@@ -1020,12 +1140,16 @@ async function probeDetails(port, firmware, attempts = 6) {
 // Cache probes because they interrupt the running program.
 async function probe(dev) {
   const p = getPort(dev);
+  // Wait out a reboot in progress, then reuse a known result or a probe already running;
+  // a recent failure is reported again for 10 s instead of probing again.
   if (Date.now() < (p.rebootingUntil || 0)) await sleep(p.rebootingUntil - Date.now());
   if (p.info) return p.info;
   if (p.probePromise) return p.probePromise;
   if (p.probeFailure && Date.now() < p.probeFailure.retryAt) throw p.probeFailure.error;
   const oldFailure = p.probeFailure;
   p.probeFailure = null;
+  // Firmware first (or ESP download mode), then its details. CircuitPython reports
+  // each value in its own command; MicroPython all at once.
   const identify = async () => {
     const detected = await probeRecord(
       p,
@@ -1033,6 +1157,7 @@ async function probe(dev) {
       "import sys;print('PVI_IMPL',getattr(sys.implementation,'name','micropython'))",
       1,
     );
+    // An ESP32 in download mode was recognised; its record is already set.
     if (detected === 'esp-bootloader') return p.info;
     let values;
     if (detected === 'circuitpython') {
@@ -1051,6 +1176,7 @@ async function probe(dev) {
     } else {
       values = await probeDetails(p, detected);
     }
+    // Build the cached record: firmware, model, capabilities and read-only state.
     const implementation = detected;
     const adapter = firmwareAdapter(implementation);
     const readOnly = implementation === 'circuitpython' ? !values.writable : false;
@@ -1073,6 +1199,8 @@ async function probe(dev) {
     };
     return p.info;
   };
+  // One shared probe per board; a failure is retried once after 2 s, unless the board
+  // was unplugged or replaced meanwhile.
   p.probePromise = (async () => {
     try { return await identify(); }
     catch (error) {
@@ -1092,6 +1220,8 @@ async function probe(dev) {
   finally { p.probePromise = null; }
 }
 
+// The route for writing to a board: a writable mounted CIRCUITPY volume, else serial.
+// Throws when the filesystem is read-only both ways.
 async function requireWritable(dev) {
   const info = await probe(dev);
   if (info.firmware === 'circuitpython') {
@@ -1115,12 +1245,17 @@ function shortModel(machine) {
   return m || machine;
 }
 
+// What was last logged per device, so the terminal shows each change only once.
 const loggedDevices = new Map();
 let loggedNoDevices = false;
 
+// The device list for the UI: drops ports that vanished or now belong to another
+// device, probes the rest (or, without waitForProbes, returns "Identifying board…"
+// placeholders while probing continues), adds CIRCUITPY mount state and BOOTSEL drives.
 async function scanDevices({ waitForProbes = true } = {}) {
   const devs = listDevs();
   const bootDevices = deviceListOverride ? Promise.resolve(bootselDeviceOverride || []) : bootselDevices();
+  // Forget ports whose device is gone or now belongs to another board.
   for (const [dev, port] of ports) {
     if (devs.includes(dev)) {
       const identity = deviceIdentity(dev);
@@ -1133,6 +1268,7 @@ async function scanDevices({ waitForProbes = true } = {}) {
     port._disconnected();
     ports.delete(dev);
   }
+  // Identify every board in parallel.
   const serialDevices = await Promise.all(devs.map(async (dev) => {
     try {
       const port = getPort(dev);
@@ -1149,6 +1285,8 @@ async function scanDevices({ waitForProbes = true } = {}) {
       const info = await probe(dev);
       if (info.firmware === 'circuitpython') {
         const root = await circuitRootForInfo(info);
+        // CircuitPython is writable when serial or a mounted volume can write; an unmounted
+        // volume gets the command that would mount it.
         const mountWritable = !!root && mountedRootWritable(root);
         info.mountAvailable = !!root;
         info.mountWritable = mountWritable;
@@ -1171,12 +1309,14 @@ async function scanDevices({ waitForProbes = true } = {}) {
       };
     }
   }));
+  // Running boards first, then install-mode devices, each group sorted by name.
   return serialDevices.concat(await bootDevices)
     .sort((a, b) => Number(!!a.bootMode) - Number(!!b.bootMode) ||
       String(a.label || a.machine || a.dev).localeCompare(String(b.label || b.machine || b.dev)) ||
       String(a.dev).localeCompare(String(b.dev)));
 }
 
+// Logs boards that appeared, changed or failed identification, once per change.
 function logDeviceChanges(devices) {
   if (!devices.length) {
     if (!loggedNoDevices) console.log('no device connected');
@@ -1192,6 +1332,7 @@ function logDeviceChanges(devices) {
   }
   for (const device of devices) {
     if (device.probing) continue;
+    // Log a board again only when something about it changed.
     const signature = [device.ok, device.firmware, device.machine, device.release, device.uid, device.error].join('|');
     if (loggedDevices.get(device.dev) === signature) continue;
     loggedDevices.set(device.dev, signature);
@@ -1212,13 +1353,16 @@ function logDeviceChanges(devices) {
 
 // ── On-device operations ────────────────────────────────────────────────────
 
+// The last line of a board traceback, which carries the actual error.
 function pyError(err) {
   const lines = cleanReplOutput(err).trim().split(/\r?\n/).filter(l => l.trim());
   return lines.length ? lines[lines.length - 1].trim() : 'Board reported an error';
 }
 
+// A JavaScript string as a quoted Python string literal.
 const pyStr = (s) => "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
 
+// A buffer as a Python bytes literal, printable ASCII kept as is.
 function pyBytes(buf) {
   let s = "b'";
   for (const b of buf) {
@@ -1230,6 +1374,8 @@ function pyBytes(buf) {
   return s + "'";
 }
 
+// A board path from user input, or null when it has empty, '.', '..', backslash or
+// control-character segments.
 function cleanPath(p) {
   if (typeof p !== 'string' || !p) return null;
   const parts = p.replace(/^\/+/, '').split('/').filter(Boolean);
@@ -1259,6 +1405,8 @@ function parseDarwinCircuitVolumes(mountOutput, ioregOutput) {
   return volumes;
 }
 
+// Mounted CIRCUITPY volumes by board UID, cached for up to 3 s; the other
+// *Override values are test seams, null in normal use.
 let circuitVolumeCache = { expires: 0, volumes: new Map() };
 let circuitVolumeOverride = null; // test seam
 let circuitVolumePromise = null;
@@ -1267,6 +1415,8 @@ let bootselDeviceOverride = null;
 let bootselInstallOverride = null;
 let espInstallOverride = null;
 
+// Folders that may be a CIRCUITPY volume: Windows drives other than C: holding
+// boot_out.txt, /Volumes on macOS, /media, /run/media and /mnt on Linux.
 function circuitMountCandidates() {
   const found = new Set();
   if (process.platform === 'win32') {
@@ -1290,6 +1440,7 @@ function circuitMountCandidates() {
   const bases = process.platform === 'darwin'
     ? ['/Volumes']
     : ['/media', '/run/media', '/mnt'];
+  // Adds CIRCUITPY folders in `directory`; Linux mounts often sit one user level deeper.
   function inspect(directory, descend) {
     let entries;
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
@@ -1304,10 +1455,12 @@ function circuitMountCandidates() {
   return [...found];
 }
 
+// The mount points of one lsblk entry, in either of lsblk's two output formats.
 function blockMountpoints(device) {
   return (Array.isArray(device.mountpoints) ? device.mountpoints : [device.mountpoint]).filter(Boolean);
 }
 
+// The lsblk device tree as JSON (path, parent, label, filesystem, serial, mount).
 async function linuxBlockDevices(run = execFileText) {
   // Newly attached USB disks can exist before udev has populated LABEL/SERIAL.
   // Bound the wait and still scan if udevadm is missing or its queue is busy.
@@ -1317,6 +1470,7 @@ async function linuxBlockDevices(run = execFileText) {
   ], { timeout: 3000 });
 }
 
+// Unmounted VFAT partitions labelled CIRCUITPY, which may be mounted automatically.
 function parseLinuxCircuitPartitions(output) {
   let parsed;
   try { parsed = JSON.parse(String(output)); } catch { return []; }
@@ -1332,6 +1486,8 @@ function parseLinuxCircuitPartitions(output) {
   return partitions;
 }
 
+// Unmounted CIRCUITPY partitions by board serial, taken from the partition or its disk,
+// so the right board can be offered the mount command.
 function parseLinuxUnmountedCircuitVolumes(output) {
   let parsed;
   try { parsed = JSON.parse(String(output)); } catch { return new Map(); }
@@ -1354,6 +1510,7 @@ function parseLinuxUnmountedCircuitVolumes(output) {
   return volumes;
 }
 
+// BOOTSEL drives (RPI-RP2 for RP2040, RP2350) in lsblk output, as device records.
 function parseBootselBlockDevices(output) {
   let parsed;
   try { parsed = JSON.parse(String(output)); } catch { return []; }
@@ -1377,6 +1534,7 @@ function parseBootselBlockDevices(output) {
   return devices;
 }
 
+// BOOTSEL drives mounted under /Volumes on macOS, from `mount` output.
 function parseDarwinBootselVolumes(output) {
   const devices = [];
   for (const line of String(output).split('\n')) {
@@ -1393,12 +1551,15 @@ function parseDarwinBootselVolumes(output) {
   return devices;
 }
 
+// The last BOOTSEL discovery error, so it is logged once rather than on every scan.
 let bootselDiscoveryError = '';
+// BOOTSEL drives on this host: by volume name on Windows, lsblk on Linux, mount on macOS.
 async function bootselDevices() {
   if (bootselDeviceOverride) return bootselDeviceOverride;
   if (process.platform === 'win32') {
     try {
       const fsutil = process.env.SystemRoot ? path.join(process.env.SystemRoot, 'System32', 'fsutil.exe') : 'fsutil';
+      // Windows: drives other than C: whose volume name is RPI-RP2 or RP2350.
       const out = await execFileText(fsutil, ['fsinfo', 'drives'], { timeout: 2000 });
       const drives = [...out.matchAll(/([A-Za-z]:\\)/g)].map(m => m[1]);
       const devices = [];
@@ -1423,6 +1584,7 @@ async function bootselDevices() {
   }
   if (process.platform === 'linux') {
     try {
+      // Linux: BOOTSEL partitions in lsblk, whether mounted or not.
       const output = await linuxBlockDevices();
       bootselDiscoveryError = '';
       return parseBootselBlockDevices(output);
@@ -1435,12 +1597,14 @@ async function bootselDevices() {
   }
   if (process.platform === 'darwin') {
     try {
+      // macOS mounts BOOTSEL drives under /Volumes by itself.
       return parseDarwinBootselVolumes(await execFileText('mount', [], { timeout: 2000 }));
     } catch { return []; }
   }
   return [];
 }
 
+// The latest official MicroPython UF2 for each Pico model, by firmware id.
 const BOOTSEL_FIRMWARE = {
   'pico': {
     chip: 'RP2040', name: 'Raspberry Pi Pico', filename: 'rp2-pico-latest.uf2',
@@ -1460,6 +1624,8 @@ const BOOTSEL_FIRMWARE = {
   },
 };
 
+// The official generic MicroPython build for each ESP32 chip: the ROM chip id it must
+// carry, where it is flashed, and the download page listing the latest .bin.
 const ESP_FIRMWARE = {
   'ESP32': {
     id: 'esp32', name: 'MicroPython for ESP32', build: 'ESP32_GENERIC', chipId: 0,
@@ -1483,11 +1649,13 @@ const ESP_FIRMWARE = {
   },
 };
 
+// A copy of the firmware entry for a chip, or null when it is not supported.
 function espFirmwareForChip(chip) {
   const firmware = ESP_FIRMWARE[chip];
   return firmware ? { ...firmware } : null;
 }
 
+// The newest .bin link for this build on the micropython.org download page.
 function resolveEspFirmwareUrl(firmware, pageHtml) {
   const links = [...String(pageHtml).matchAll(/href=["']([^"']+\.bin)["']/gi)]
     .map(match => new URL(match[1], firmware.page))
@@ -1498,16 +1666,21 @@ function resolveEspFirmwareUrl(firmware, pageHtml) {
   return links[0].href;
 }
 
+// Downloads the download page, then the newest image it links to.
 async function downloadEspFirmware(firmware, download = downloadFirmware) {
   const page = await download(firmware.page);
   const url = resolveEspFirmwareUrl(firmware, page.toString('utf8'));
   return download(url);
 }
 
+// Validates an ESP firmware image before anything is written: magic byte, segment
+// count, chip id, segment bounds, XOR checksum and the optional SHA-256. Returns its
+// flash size and segment count.
 function espImageInfo(image, expectedChipId) {
   if (!Buffer.isBuffer(image) || image.length < 48 || image.length > 8 * 1024 * 1024) {
     throw new Error('Downloaded ESP firmware has an invalid size');
   }
+  // Image header: magic 0xE9, segment count, flash size; the chip id sits at byte 12.
   if (image[0] !== 0xe9) throw new Error('Downloaded file is not an ESP firmware image');
   const segmentCount = image[1];
   if (!segmentCount || segmentCount > 16) throw new Error('ESP firmware has an invalid segment count');
@@ -1516,6 +1689,7 @@ function espImageInfo(image, expectedChipId) {
     throw new Error('Downloaded firmware is for a different ESP32 chip');
   }
   let checksum = 0xef;
+  // Walk the segments, XOR-ing their data into the checksum stored after the last one.
   let cursor = 24;
   for (let segment = 0; segment < segmentCount; segment++) {
     if (cursor + 8 > image.length) throw new Error('ESP firmware segment header is truncated');
@@ -1531,6 +1705,7 @@ function espImageInfo(image, expectedChipId) {
   if (checksumOffset >= image.length || image[checksumOffset] !== checksum) {
     throw new Error('ESP firmware checksum is invalid');
   }
+  // Byte 23 says a SHA-256 of the whole image follows the checksum.
   const hasSha256 = image[23] === 1;
   if (hasSha256) {
     const digestOffset = checksumOffset + 1;
@@ -1540,28 +1715,35 @@ function espImageInfo(image, expectedChipId) {
       throw new Error('ESP firmware SHA-256 digest is invalid');
     }
   }
+  // The high nibble of byte 3 encodes the flash size the image was built for.
   const flashSizeCode = image[3] >> 4;
   const flashSize = ({ 0: 1, 1: 2, 2: 4, 3: 8, 4: 16, 5: 32, 6: 64, 7: 128 })[flashSizeCode];
   return { chipId, segmentCount, flashSize: flashSize ? flashSize * 1024 * 1024 : null, hasSha256 };
 }
 
+// 32-bit little-endian words, the ROM's argument format.
 function espWords(...values) {
   const data = Buffer.alloc(values.length * 4);
   values.forEach((value, index) => data.writeUInt32LE(value >>> 0, index * 4));
   return data;
 }
 
+// The ROM's XOR checksum of a data block.
 function espChecksum(data) {
   let checksum = 0xef;
   for (const byte of data) checksum ^= byte;
   return checksum;
 }
 
+// One FLASH_DATA payload: length and sequence number, then the data.
 function espInstallBlock(data, sequence) {
   return Buffer.concat([espWords(data.length, sequence, 0, 0), data]);
 }
 
+// Where the board's filesystem lives: the partition labelled "vfs", else the flash
+// after the last partition in the image's table. Null when no table is found.
 function espStorageRange(image, firmware, flashSize) {
+  // The partition table sits at flash address 0x8000, inside the image.
   const tableOffset = 0x8000 - firmware.offset;
   if (tableOffset < 0 || tableOffset + 32 > image.length) return null;
   let partitionEnd = 0;
@@ -1582,11 +1764,14 @@ function espStorageRange(image, firmware, flashSize) {
   return entries && start < flashSize ? { offset: start, size: flashSize - start } : null;
 }
 
+// Erases the filesystem region by writing 0xFF through the ROM's compressed-flash
+// commands, then checks it with SPI_FLASH_MD5.
 async function initializeEspFlashStorage(port, device, firmware, image, flashSize, onProgress) {
   const storage = espStorageRange(image, firmware, flashSize);
   if (!storage) throw new Error('Could not locate the ESP32 filesystem region in this firmware image');
   onProgress({ stage: 'initializing', percent: 0 });
   const blockSize = 0x400;
+  // Erased flash reads 0xFF; compressing it keeps the transfer tiny.
   const blank = Buffer.alloc(storage.size, 0xff);
   const compressed = zlib.deflateSync(blank, { level: 9 });
   const blocks = Math.ceil(compressed.length / blockSize);
@@ -1615,6 +1800,8 @@ async function initializeEspFlashStorage(port, device, firmware, image, flashSiz
   return storage;
 }
 
+// The firmware for a download-mode chip, or an error when the chip is unsupported or
+// its flash security is enabled or unknown.
 function assertEspInstallAllowed(device) {
   const firmware = espFirmwareForChip(device && device.machine);
   if (!device || device.bootloader !== 'esp-rom' || !firmware) {
@@ -1630,6 +1817,9 @@ function assertEspInstallAllowed(device) {
   return firmware;
 }
 
+// Writes a validated image through the ROM: re-checks the chip is the one selected,
+// writes 1 KB blocks (each retried once), verifies the flash with MD5, optionally
+// erases the filesystem, then reboots into MicroPython.
 async function flashEspImage(port, device, firmware, image, onProgress = () => {}, options = {}) {
   const imageInfo = espImageInfo(image, firmware.chipId);
   const detected = await detectEspBootloader(port);
@@ -1644,14 +1834,17 @@ async function flashEspImage(port, device, firmware, image, onProgress = () => {
   const flashSize = Math.max(imageInfo.flashSize || 4 * 1024 * 1024,
     Math.ceil((firmware.offset + image.length) / 0x100000) * 0x100000);
   onProgress({ stage: 'preparing', percent: 0 });
+  // SPI_ATTACH and SPI_SET_PARAMS tell the ROM which flash chip and size to use.
   await espRomCommand(port, 0x0d, espWords(0, 0), 3000);
   await espRomCommand(port, 0x0b, espWords(0, flashSize, 0x10000, 0x1000, 0x100, 0xffff), 3000);
   let storage = null;
   if (options.initializeStorage && !espStorageRange(image, firmware, flashSize)) {
     throw new Error('Could not locate the ESP32 filesystem region in this firmware image');
   }
+  // FLASH_BEGIN erases the target area; every chip but the classic ESP32 takes one extra word.
   const begin = espWords(image.length, blocks, blockSize, firmware.offset);
   const beginData = device.machine === 'ESP32' ? begin : Buffer.concat([begin, espWords(0)]);
+  // FLASH_BEGIN can take a while on a large image while the chip erases.
   await espRomCommand(port, 0x02, beginData,
     Math.max(10000, Math.ceil(image.length / 1000000) * 40000));
 
@@ -1672,12 +1865,13 @@ async function flashEspImage(port, device, firmware, image, onProgress = () => {
     if (lastError) {
       const address = '0x' + (firmware.offset + start).toString(16).padStart(8, '0');
       throw new Error(String(lastError.message || lastError) +
-        ' — firmware block ' + (sequence + 1) + '/' + blocks +
+        ', firmware block ' + (sequence + 1) + '/' + blocks +
         ', flash address ' + address + ', after 2 attempts', { cause: lastError });
     }
     onProgress({ stage: 'writing', percent: Math.round(((sequence + 1) / blocks) * 100) });
   }
 
+  // SPI_FLASH_MD5 of the written area must match the image.
   onProgress({ stage: 'verifying', percent: 100 });
   const md5Reply = await espRomCommand(port, 0x13,
     espWords(firmware.offset, image.length, 0, 0),
@@ -1695,7 +1889,10 @@ async function flashEspImage(port, device, firmware, image, onProgress = () => {
   return { imageInfo, md5: localMd5, rebooted, storage };
 }
 
+// Restarts the chip after an install, preferring a DTR/RTS hard reset over the ROM's
+// run command, and pauses probing while MicroPython starts.
 async function rebootEspAfterInstall(port, device, resetLines = resetEspLines) {
+  // Native USB boards need their own reset sequence.
   const nativeUsb = espResetStrategies(device, port.dev)[0] === 'usb-jtag';
   let rebooted = false;
   if (process.platform === 'win32' && port.winPort && resetLines === resetEspLines) {
@@ -1727,15 +1924,18 @@ async function rebootEspAfterInstall(port, device, resetLines = resetEspLines) {
   return rebooted;
 }
 
+// The ESP32 install job: one per port, download and validate, then flash.
 async function installEspFirmware(dev, download = downloadFirmware, onProgress = () => {}, options = {}) {
   if (!dev || !listDevs().includes(dev)) throw new Error('ESP32 is no longer connected');
   if (espInstalls.has(dev)) throw new Error('An ESP32 installation is already running on this port');
+  // Marks the port busy so a Scan does not interrupt the install.
   espInstalls.add(dev);
   try {
     const port = getPort(dev);
     const device = port.info || await probe(dev);
     const firmware = assertEspInstallAllowed(device);
     onProgress({ stage: 'downloading', percent: 0 });
+    // Download and validate before the board is touched.
     const image = await downloadEspFirmware(firmware, download);
     espImageInfo(image, firmware.chipId);
     onProgress({ stage: 'validating', percent: 0 });
@@ -1751,15 +1951,19 @@ async function installEspFirmware(dev, download = downloadFirmware, onProgress =
   } finally { espInstalls.delete(dev); }
 }
 
+// The Pico models a BOOTSEL chip can take (the W variant cannot be detected).
 function bootselFirmwareOptions(chip) {
   return Object.entries(BOOTSEL_FIRMWARE)
     .filter(([, firmware]) => firmware.chip === chip)
     .map(([id, firmware]) => ({ id, name: firmware.name }));
 }
 
+// Downloads firmware over HTTPS from micropython.org only, following at most three
+// redirects, up to 8 MB and 30 s.
 function downloadFirmware(url, redirects = 3) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
+    // Only HTTPS from micropython.org, including after a redirect.
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'micropython.org') {
       reject(new Error('Firmware download host is not allowed'));
       return;
@@ -1779,6 +1983,7 @@ function downloadFirmware(url, redirects = 3) {
       let size = 0;
       response.on('data', chunk => {
         size += chunk.length;
+        // A firmware image never exceeds 8 MB.
         if (size > 8 * 1024 * 1024) {
           request.destroy(new Error('Firmware download is too large'));
           return;
@@ -1793,6 +1998,7 @@ function downloadFirmware(url, redirects = 3) {
   });
 }
 
+// The mount point of a BOOTSEL drive, mounting it with udisksctl on Linux when needed.
 async function mountedBootselRoot(device) {
   if (device.mountRoot) return device.mountRoot;
   if (process.platform !== 'linux' || !device.blockDevice) return null;
@@ -1812,7 +2018,11 @@ async function mountedBootselRoot(device) {
   return refreshed && refreshed.mountRoot;
 }
 
+// Validates a UF2 image for the chip before it is copied: block magic numbers, flash
+// address range, family id, complete and non-overlapping blocks (the RP2350 prefix
+// block is allowed).
 function validateUf2Image(image, chip) {
+  // UF2 family ids the chip accepts (RP2350: ARM secure, RISC-V, ARM non-secure).
   const families = chip === 'RP2040' ? [0xe48bff56] :
     chip === 'RP2350' ? [0xe48bff59, 0xe48bff5a, 0xe48bff5b] : [];
   const invalid = reason => { throw new Error('Invalid UF2 image: ' + reason); };
@@ -1820,6 +2030,7 @@ function validateUf2Image(image, chip) {
   if (!Buffer.isBuffer(image) || !image.length || image.length > 8 * 1024 * 1024 || image.length % 512) {
     invalid('size must be a nonzero multiple of 512 bytes, up to 8 MB');
   }
+  // Blocks are grouped by family to check each is complete and non-overlapping.
   const groups = new Map();
   let absoluteBlock = false;
   for (let offset = 0; offset < image.length; offset += 512) {
@@ -1860,6 +2071,9 @@ function validateUf2Image(image, chip) {
   }
 }
 
+// Installs MicroPython on a BOOTSEL drive: checks the model matches the chip, mounts
+// the drive if needed, downloads and validates the UF2, then copies it (the board
+// reboots by itself once the copy completes).
 async function installBootselFirmware(dev, firmwareId, download = downloadFirmware, onProgress = () => {}) {
   const firmware = BOOTSEL_FIRMWARE[firmwareId];
   if (!firmware) throw new Error('Unknown firmware selection');
@@ -1874,11 +2088,14 @@ async function installBootselFirmware(dev, firmwareId, download = downloadFirmwa
   onProgress({ stage: 'validating', percent: 0 });
   validateUf2Image(image, firmware.chip);
   onProgress({ stage: 'writing', percent: 0 });
+  // Copying the UF2 is the whole install: the board flashes it and reboots.
   await fs.promises.writeFile(path.join(root, firmware.filename), image);
   onProgress({ stage: 'rebooting', percent: 100 });
   return { ok: true, firmware: firmware.name, bytes: image.length };
 }
 
+// On a Pi, mounts unmounted CIRCUITPY partitions with udisksctl and remembers the ones
+// that need permission, for the UI to show the mount command.
 async function autoMountCircuitPartitions() {
   if (!RASPBERRY_PI_HOST) return;
   unmountedCircuitVolumes = new Map();
@@ -1894,6 +2111,7 @@ async function autoMountCircuitPartitions() {
   ));
 }
 
+// Matches volumes to boards by the UID line in each volume's boot_out.txt.
 function bootOutCircuitVolumes(roots = circuitMountCandidates()) {
   const volumes = new Map();
   for (const root of roots) {
@@ -1906,12 +2124,15 @@ function bootOutCircuitVolumes(roots = circuitMountCandidates()) {
   return volumes;
 }
 
+// CIRCUITPY volumes by board UID: boot_out.txt first, then on macOS the USB serial
+// numbers from ioreg for volumes it did not cover. One lookup runs at a time.
 async function circuitVolumes() {
   if (circuitVolumeOverride) return circuitVolumeOverride;
   if (Date.now() < circuitVolumeCache.expires) return circuitVolumeCache.volumes;
   if (!circuitVolumePromise) circuitVolumePromise = (async () => {
     await autoMountCircuitPartitions();
     const roots = circuitMountCandidates();
+    // boot_out.txt covers every volume on Linux and Windows; macOS may need ioreg too.
     const bootVolumes = bootOutCircuitVolumes(roots);
     if (bootVolumes.size === roots.length || process.platform !== 'darwin') {
       circuitVolumeCache = { expires: Date.now() + 3000, volumes: bootVolumes };
@@ -1933,6 +2154,7 @@ async function circuitVolumes() {
   return circuitVolumePromise;
 }
 
+// The mounted volume of a CircuitPython board, if it is still a directory.
 async function circuitRootForInfo(info) {
   if (info.firmware !== 'circuitpython' || !info.uid) return null;
   const root = (await circuitVolumes()).get(info.uid.toLowerCase());
@@ -1941,10 +2163,12 @@ async function circuitRootForInfo(info) {
   catch { return null; }
 }
 
+// The mounted volume of the board on `dev`, or null.
 async function mountedCircuitRoot(dev) {
   return circuitRootForInfo(await probe(dev));
 }
 
+// True when this host may write to the mounted volume.
 function mountedRootWritable(root) {
   try {
     fs.accessSync(root, fs.constants.W_OK);
@@ -1952,17 +2176,23 @@ function mountedRootWritable(root) {
   } catch { return false; }
 }
 
+// A board path as a host path inside the mounted volume, or null when it would escape
+// the volume (or, on Windows, use drive or stream syntax).
 function mountedPath(root, devicePath, pathApi = path) {
   const clean = cleanPath(devicePath);
   if (!clean) return null;
   // Windows normalizes trailing dots/spaces and interprets colons as drive/stream syntax.
+  // Windows trims trailing dots and spaces and reads colons as drive or stream syntax.
   if (pathApi.sep === '\\' && clean.split('/').some(part => /:|[. ]$/.test(part))) return null;
+  // The result must stay strictly inside the volume.
   const resolvedRoot = pathApi.resolve(root);
   const target = pathApi.resolve(root, ...clean.split('/'));
   const prefix = resolvedRoot.endsWith(pathApi.sep) ? resolvedRoot : resolvedRoot + pathApi.sep;
   return target !== resolvedRoot && target.startsWith(prefix) ? target : null;
 }
 
+// Lists a mounted volume like listFiles does over serial: up to 8 levels deep, dot
+// files hidden unless asked for, symbolic links skipped.
 function listMountedFiles(root, includeSystemFiles = false) {
   const files = [];
   function walk(relative, depth) {
@@ -1971,6 +2201,7 @@ function listMountedFiles(root, includeSystemFiles = false) {
     let names;
     try { names = fs.readdirSync(directory).sort(); } catch { return; }
     for (const name of names) {
+      // Hidden (dot) files are skipped unless asked for.
       if (!includeSystemFiles && name.startsWith('.')) continue;
       const child = relative ? relative + '/' + name : name;
       const absolute = mountedPath(root, child);
@@ -1991,7 +2222,10 @@ function listMountedFiles(root, includeSystemFiles = false) {
   return files;
 }
 
+// Board-side code that walks the filesystem and prints one "PVF isdir size mtime path"
+// line per entry.
 function listCode(includeSystemFiles) {
+  // Dot files are filtered on the board unless asked for.
   const hideSystemLine = includeSystemFiles ? '' : "        if n.startswith('.'):\n            continue\n";
   return `
 import os
@@ -2016,6 +2250,7 @@ _w('', 0)
 `.trim();
 }
 
+// Every file and folder on the board, from the mounted volume when there is one.
 async function listFiles(dev, includeSystemFiles = false) {
   const root = await mountedCircuitRoot(dev);
   if (root) {
@@ -2028,6 +2263,7 @@ async function listFiles(dev, includeSystemFiles = false) {
   return parseFileList(out);
 }
 
+// Turns PVF lines into file records.
 function parseFileList(out) {
   const files = [];
   for (const line of cleanReplOutput(out).split(/\r?\n/)) {
@@ -2046,11 +2282,13 @@ function parseFileList(out) {
   return files;
 }
 
+// Flash total/free and RAM free/allocated, after a garbage collection.
 async function deviceStats(dev) {
   const p = getPort(dev);
   const { out, err } = await p.command(port => port.exec([
     'import os, gc',
     'gc.collect()',
+    // statvfs gives block size and total/free blocks; gc reports RAM.
     "s = os.statvfs('/')",
     "print('PVS', s[0] * s[2], s[0] * s[3], gc.mem_free(), gc.mem_alloc())",
   ].join('\n'), { timeout: 8000 }));
@@ -2061,6 +2299,8 @@ async function deviceStats(dev) {
   return { fsTotal: total, fsFree: free, memFree, memAlloc };
 }
 
+// Formats the "vfs" partition of an ESP32 whose filesystem was never created (LittleFS
+// v2), mounts it at /, and reports the new size. Refused when storage already exists.
 async function initializeEspStorage(dev) {
   const info = await probe(dev);
   if (info.firmware !== 'micropython' || !/ESP32(?:\b|-)/.test((info.machine || '') + ' ' + (info.label || ''))) {
@@ -2073,6 +2313,7 @@ async function initializeEspStorage(dev) {
   const port = getPort(dev);
   const code = [
     'import os, esp32',
+    // Board-side: find the vfs partition, format it as LittleFS v2, and mount it.
     "_parts = esp32.Partition.find(esp32.Partition.TYPE_DATA, label='vfs')",
     "if not _parts: raise OSError('VFS partition was not found')",
     '_part = _parts[0]',
@@ -2089,6 +2330,8 @@ async function initializeEspStorage(dev) {
 // Hex encoding preserves binary data through the text REPL.
 async function readFile(dev, file) {
   const root = await mountedCircuitRoot(dev);
+  // A mounted volume is read directly; a failure there drops the volume cache and
+  // falls back to serial.
   const local = root && mountedPath(root, file);
   if (local) {
     try {
@@ -2103,6 +2346,7 @@ async function readFile(dev, file) {
     'while True:',
     '    _b = _f.read(512)',
     '    if not _b: break',
+    // Board-side: print the file as hex in 512-byte lines, joined back together below.
     "    print('PVD' + binascii.hexlify(_b).decode())",
     '_f.close()',
   ].join('\n');
@@ -2116,6 +2360,8 @@ async function readFile(dev, file) {
   return Buffer.from(hex, 'hex');
 }
 
+// Writes a file through the mounted volume when possible, else over serial in 1 KB
+// chunks, creating missing parent folders first.
 async function writeFile(dev, file, buf) {
   const access = await requireWritable(dev);
   if (access.mode === 'mount') {
@@ -2130,6 +2376,7 @@ async function writeFile(dev, file, buf) {
   const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
   return p.command(async (port) => {
     if (dir) {
+      // Board-side: create each missing parent folder in turn.
       const mk = await port.exec([
         'import os',
         'p = ' + pyStr(dir),
@@ -2143,6 +2390,7 @@ async function writeFile(dev, file, buf) {
       ].join('\n'));
       if (mk.err.trim()) throw new Error(pyError(mk.err));
     }
+    // Open once, send 1 KB bytes literals to its write method, then close.
     let r = await port.exec('_f = open(' + pyStr(file) + ", 'wb')\n_w = _f.write");
     if (r.err.trim()) throw new Error(pyError(r.err));
     for (let off = 0; off < buf.length; off += 1024) {
@@ -2155,6 +2403,7 @@ async function writeFile(dev, file, buf) {
   });
 }
 
+// Board-side helper that deletes a file, or a folder and everything in it.
 const RMTREE = [
   'import os',
   'def _rm(p):',
@@ -2166,6 +2415,8 @@ const RMTREE = [
   '        os.remove(p)',
 ].join('\n');
 
+// Deletes a file, or a folder with everything in it. Symbolic links on a mounted
+// volume are refused rather than followed.
 async function removePath(dev, file) {
   const access = await requireWritable(dev);
   if (access.mode === 'mount') {
@@ -2183,10 +2434,12 @@ async function removePath(dev, file) {
   return { ok: true };
 }
 
+// Deletes every file and folder on the board and returns the list removed.
 async function cleanAll(dev) {
   const access = await requireWritable(dev);
   if (access.mode === 'mount') {
     const removed = [];
+    // Mounted volume: delete each top-level entry, skipping symbolic links.
     for (const name of fs.readdirSync(access.root)) {
       const local = mountedPath(access.root, name);
       if (!local) continue;
@@ -2200,6 +2453,7 @@ async function cleanAll(dev) {
   const p = getPort(dev);
   const { out, err } = await p.command(port => port.exec(
     RMTREE + '\n' + [
+      // Over serial: delete each top-level entry and report it.
       "for n in os.listdir('/'):",
       '    _rm(n)',
       "    print('removed', n)",
@@ -2208,6 +2462,7 @@ async function cleanAll(dev) {
   return { ok: true, log: out.trim() };
 }
 
+// Runs a short code snippet, throwing on a board error.
 async function simpleOp(dev, code, timeout = 15000) {
   const p = getPort(dev);
   const { out, err } = await p.command(port => port.exec(code, { timeout }));
@@ -2215,6 +2470,8 @@ async function simpleOp(dev, code, timeout = 15000) {
   return { ok: true, out };
 }
 
+// Which install mode a running board can be sent to: 'download' for an ESP32 on
+// MicroPython, 'bootsel' for a Pico, null otherwise.
 function bootloaderMode(info) {
   if (!info || info.bootMode || !['micropython', 'circuitpython'].includes(info.firmware)) return null;
   const model = (info.machine || '') + ' ' + (info.label || '');
@@ -2222,19 +2479,37 @@ function bootloaderMode(info) {
   return /RP2040|RP2350|Raspberry Pi Pico/i.test(model) ? 'bootsel' : null;
 }
 
+// DTR/RTS sequences to try, in order, to reach ESP download mode.
 function espResetStrategies(info, dev) {
   const serial = ['tight', 'tight-slow', 'classic', 'classic-slow'];
   // Windows COM names do not distinguish native USB from UART bridges.
   // Try native USB on C3/S3 COM ports, retaining the UART fallbacks.
-  return /ESP32-?[CS]3/i.test(info.machine || '') && /(?:usbmodem|ttyACM|^COM\d+$)/i.test(dev)
-    ? ['usb-jtag', ...serial] : serial;
+  const machine = info?.machine || '';
+  const mayBeUsbJtag = (!machine || /ESP32-?[CS]3/i.test(machine)) &&
+    /(?:usbmodem|ttyACM|^COM\d+$)/i.test(dev);
+  return mayBeUsbJtag ? ['usb-jtag', ...serial] : serial;
 }
 
-async function enterBootloader(dev) {
-  const info = await probe(dev);
-  const mode = bootloaderMode(info);
-  if (!mode) throw new Error('Firmware install mode is unavailable for this board');
-  if (mode === 'download') {
+// Sends a board to its install mode. An ESP32 is reset into ROM download mode by
+// trying each DTR/RTS sequence until the ROM answers (falling back to manual
+// instructions); a Pico runs machine.bootloader() (or CircuitPython's equivalent).
+async function enterBootloader(dev, requestedMode = null) {
+  let info = null;
+  let probeErr = null;
+  try {
+    info = await probe(dev);
+  } catch (err) {
+    probeErr = err;
+  }
+  const mode = requestedMode || bootloaderMode(info);
+  const isEspCandidate = mode === 'download' ||
+    (!info && /watchdog resets|download bootloader|ESP/i.test(String(probeErr?.message || probeErr)));
+  if (!mode && !isEspCandidate) {
+    throw (probeErr || new Error('Firmware install mode is unavailable for this board'));
+  }
+  const effectiveMode = mode || (isEspCandidate ? 'download' : null);
+  if (effectiveMode === 'download') {
+    info = info || { dev, machine: '', firmware: 'unknown' };
     const port = getPort(dev);
     return port.command(async active => {
       const reset = mode => process.platform === 'win32' && active.winPort ?
@@ -2243,6 +2518,7 @@ async function enterBootloader(dev) {
       // a newly entered ROM loader.
       active.halted = false;
       try {
+        // Try each reset sequence until the ROM answers SYNC.
         for (const mode of espResetStrategies(info, dev)) {
           await reset(mode);
           await sleep(100);
@@ -2258,6 +2534,7 @@ async function enterBootloader(dev) {
         }
         throw new Error('ESP ROM did not respond after automatic reset');
       } catch (error) {
+        // Nothing answered: reset back to normal and let the user enter download mode by hand.
         await reset('normal').catch(() => {});
         active.info = null;
         active.probeFailure = null;
@@ -2265,6 +2542,8 @@ async function enterBootloader(dev) {
       }
     }, { rawRepl: false });
   }
+  if (!info) throw (probeErr || new Error('Firmware install mode is unavailable for this board'));
+  // A Pico enters BOOTSEL from its own firmware.
   const code = info.firmware === 'circuitpython'
     ? 'import microcontroller\nmicrocontroller.on_next_reset(microcontroller.RunMode.BOOTLOADER)\nmicrocontroller.reset()'
     : 'import machine\nmachine.bootloader()';
@@ -2285,6 +2564,7 @@ async function enterBootloader(dev) {
   return { ok: true };
 }
 
+// Creates a folder and any missing parents; an existing folder is fine.
 async function makeDirectory(dev, file) {
   const access = await requireWritable(dev);
   if (access.mode === 'mount') {
@@ -2304,6 +2584,7 @@ async function makeDirectory(dev, file) {
       '    try:',
       '        os.mkdir(acc)',
       '    except OSError as e:',
+      // Errno 17 (EEXIST) means the folder is already there.
       '        if e.args[0] != 17:',
       '            raise',
     ].join('\n'));
@@ -2312,6 +2593,7 @@ async function makeDirectory(dev, file) {
   });
 }
 
+// Renames or moves a file or folder.
 async function renamePath(dev, from, to) {
   const access = await requireWritable(dev);
   if (access.mode === 'mount') {
@@ -2324,8 +2606,12 @@ async function renamePath(dev, from, to) {
   return simpleOp(dev, 'import os\nos.rename(' + pyStr(from) + ', ' + pyStr(to) + ')');
 }
 
+// Runs a board file as __main__, or one console line, streaming its output to the
+// console. A file that defines read() is called and its result printed as JSON;
+// top-level code with a `return` is wrapped in a function so it still runs.
 async function runPython(dev, options = {}) {
   const info = await probe(dev);
+  // Exactly one of a file path or a code line, and only when the firmware allows it.
   const hasPath = options.path !== undefined;
   const hasCode = options.code !== undefined;
   if (hasPath === hasCode) throw new Error('Provide exactly one of path or code');
@@ -2339,6 +2625,8 @@ async function runPython(dev, options = {}) {
     const file = cleanPath(options.path);
     if (!file) throw new Error('Bad path');
     const pyFilePath = pyStr(file);
+    // Board-side: exec the file as __main__, call read() if it defines one, and print any
+    // result as JSON (repr when it is not JSON-serializable).
     code = `_g = {'__name__': '__main__'}\n` +
       `_src = open(${pyFilePath}).read()\n` +
       `_res = None\n` +
@@ -2363,6 +2651,7 @@ async function runPython(dev, options = {}) {
   }
   if (!code.trim()) throw new Error('Nothing to run');
 
+  // Echo what runs to the console, then stream its output there as it arrives.
   port._emit('sys', banner);
   const result = await port.command(async (pt) => {
     let carried = '';
@@ -2371,44 +2660,52 @@ async function runPython(dev, options = {}) {
       onChunk: (chunk) => { carried += chunk; port._emit('out', chunk); },
     }).then(r => { r.streamed = carried; return r; });
   });
+  // Print whatever arrived after the last streamed chunk.
   if (result.out && result.out.length > (result.streamed ? result.streamed.length : 0)) {
     port._emit('out', result.out.slice(result.streamed ? result.streamed.length : 0));
   }
   if (result.err.trim()) port._emit('err', result.err);
-  port._emit('sys', '— finished —\n');
+  port._emit('sys', '[finished]\n');
   return { ok: !result.err.trim(), out: result.out, err: result.err };
 }
 
+// Sends Ctrl-C twice to stop a running program.
 async function interruptBoard(dev) {
   const port = getPort(dev);
   if (port.fd !== null || port.winPort) await port.write('\r' + CTRL_C + CTRL_C);
-  port._emit('sys', '— interrupt sent —\n');
+  port._emit('sys', '[interrupt sent]\n');
   return { ok: true };
 }
 
+// A soft reset restarts main.py through the raw REPL; a hard reset runs the firmware's
+// reset call and forgets the port, since the board drops off USB.
 async function resetBoard(dev, hard = false) {
   const port = getPort(dev);
   if (hard) {
     const info = await probe(dev);
+    // The board drops off USB during a hard reset, so the port is forgotten afterwards.
     const adapter = firmwareAdapter(info.firmware);
     if (!adapter.hardResetCode) throw new Error('Hard reset is not supported for this firmware');
     port.command(pt => pt.exec(adapter.hardResetCode, { timeout: 1500 })).catch(() => {});
     setTimeout(() => { port._close(); ports.delete(dev); }, 500);
-    port._emit('sys', '— hard reset —\n');
+    port._emit('sys', '[hard reset]\n');
     return { ok: true, hard: true };
   }
+  // A soft reset is an empty command followed by an immediate release.
   await port.command(async () => {});
   await port.releaseNow();
-  port._emit('sys', '— soft reset, program restarted —\n');
+  port._emit('sys', '[soft reset, program restarted]\n');
   return { ok: true };
 }
 
 // ── Console subscribers (Server-Sent Events) ────────────────────────────────
 async function attachConsole(dev, res) {
   const p = getPort(dev);
+  // Each console line goes to the browser as one Server-Sent Event.
   const send = (type, text) => {
     try { res.write('data: ' + JSON.stringify({ type, text }) + '\n\n'); } catch { /* gone */ }
   };
+  // Subscribe first, so nothing printed in between is lost.
   await p.addMonitor(send);
   if (res.destroyed) { p.removeMonitor(send); return; }
   res.writeHead(200, {
@@ -2416,15 +2713,18 @@ async function attachConsole(dev, res) {
     'Cache-Control': 'no-store',
     'Connection': 'keep-alive',
   });
+  // The browser reconnects 2 s after a drop; a comment line every 15 s keeps it open.
   res.write('retry: 2000\n\n');
-  send('sys', '— attached to ' + dev + ' —\n');
+  send('sys', '[attached to ' + dev + ']\n');
   const ka = setInterval(() => { try { res.write(': ka\n\n'); } catch { /* gone */ } }, 15000);
+  // Stop the keep-alive and unsubscribe when the browser goes away.
   const done = () => { clearInterval(ka); p.removeMonitor(send); };
   res.on('close', done);
   res.on('error', done);
 }
 
 // ── ZIP creation (uncompressed Store ZIP format) ─────────────────────────
+// The CRC-32 a ZIP entry carries.
 function crc32(buf) {
   let crc = 0xFFFFFFFF;
   for (let i = 0; i < buf.length; i++) {
@@ -2436,6 +2736,8 @@ function crc32(buf) {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
+// Builds an uncompressed (Store) ZIP from { path, content, mtime } entries: a local
+// header and data per file, then the central directory and its end record.
 function createZipBuffer(entries) {
   const parts = [];
   const centralRecords = [];
@@ -2453,6 +2755,7 @@ function createZipBuffer(entries) {
     const dosTime = ((dt.getHours() & 0x1f) << 11) | ((dt.getMinutes() & 0x3f) << 5) | ((dt.getSeconds() >> 1) & 0x1f);
     const dosDate = (((dt.getFullYear() - 1980) & 0x7f) << 9) | (((dt.getMonth() + 1) & 0x0f) << 5) | (dt.getDate() & 0x1f);
 
+    // Local file header.
     const lhdr = Buffer.alloc(30);
     lhdr.writeUInt32LE(0x04034b50, 0);
     lhdr.writeUInt16LE(20, 4);
@@ -2468,6 +2771,7 @@ function createZipBuffer(entries) {
 
     parts.push(lhdr, nameBuf, dataBuf);
 
+    // Central directory record pointing back at the local header.
     const chdr = Buffer.alloc(46);
     chdr.writeUInt32LE(0x02014b50, 0);
     chdr.writeUInt16LE(20, 4);
@@ -2484,7 +2788,9 @@ function createZipBuffer(entries) {
     chdr.writeUInt16LE(0, 32);
     chdr.writeUInt16LE(0, 34);
     chdr.writeUInt16LE(0, 36);
+    // External attributes: a regular file with 0644 permissions.
     chdr.writeUInt32LE(0x81a40000, 38);
+    // Where this entry's local header starts.
     chdr.writeUInt32LE(offset, 42);
 
     centralRecords.push(chdr, nameBuf);
@@ -2499,6 +2805,7 @@ function createZipBuffer(entries) {
     parts.push(buf);
   }
 
+  // End of central directory: entry count, size and offset of the directory.
   const eocd = Buffer.alloc(22);
   eocd.writeUInt32LE(0x06054b50, 0);
   eocd.writeUInt16LE(0, 4);
@@ -2518,6 +2825,7 @@ function createZipBuffer(entries) {
 function parseRestoreZip(buf) {
   let eocd = -1;
   const floor = Math.max(0, buf.length - 65557);
+  // The end record sits in the last 64 KB (after a comment of up to 65535 bytes).
   for (let i = buf.length - 22; i >= floor; i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
@@ -2541,12 +2849,14 @@ function parseRestoreZip(buf) {
     const extraLen = buf.readUInt16LE(at + 30);
     const commentLen = buf.readUInt16LE(at + 32);
     const localAt = buf.readUInt32LE(at + 42);
+    // Only unencrypted Store or Deflate entries, 16 MB in total, with safe unique paths.
     if (flags & 1) throw new Error('Encrypted ZIP files are not supported');
     if (method !== 0 && method !== 8) throw new Error('Unsupported ZIP compression method: ' + method);
     if (method === 0 && compressedSize !== size) throw new Error('Invalid stored ZIP entry');
     if (size > 16 * 1024 * 1024 - total) throw new Error('ZIP contents exceed 16 MiB');
     const rawName = buf.subarray(at + 46, at + 46 + nameLen).toString('utf8');
     at += 46 + nameLen + extraLen + commentLen;
+    // Folders are created along with their files.
     if (rawName.endsWith('/')) continue;
     const file = cleanPath(rawName);
     if (!file || file !== rawName || names.has(file)) throw new Error('Invalid ZIP path: ' + rawName);
@@ -2563,6 +2873,7 @@ function parseRestoreZip(buf) {
       content = compressed;
     } else {
       try {
+        // The output limit stops an entry inflating to more than it declares.
         content = zlib.inflateRawSync(compressed, { maxOutputLength: size + 1 });
       } catch {
         throw new Error('Could not decompress ZIP entry: ' + file);
@@ -2579,11 +2890,13 @@ function parseRestoreZip(buf) {
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
+// Sends a JSON reply that browsers never cache.
 const sendJSON = (res, code, obj) => {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 };
 
+// The whole request body, refused past `limit` bytes.
 function readBody(req, limit = 8 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -2608,12 +2921,14 @@ function asText(buf) {
 }
 
 // ── Model Context Protocol ─────────────────────────────────────────────────
+// The MCP revision served, the older ones still accepted on initialize, and the limits.
 const MCP_PROTOCOL = '2026-07-28';
 const MCP_LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'];
 const MCP_SERVER_INFO = { name: 'pico-bay', version: VERSION };
 const MCP_CAPABILITIES = { tools: { listChanged: false } };
 const MCP_MAX_BODY = 12 * 1024 * 1024;
 
+// An MCP tool result: the data as JSON text plus structuredContent, flagged on error.
 function mcpToolResult(data, isError = false) {
   const text = isError
     ? (data && data.error ? String(data.error) : JSON.stringify(data))
@@ -2626,6 +2941,7 @@ function mcpToolResult(data, isError = false) {
   return result;
 }
 
+// Rejects tool arguments that are not an object, unknown, or missing.
 function validateToolArgs(value, allowed, required = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Arguments must be an object');
@@ -2639,6 +2955,7 @@ function validateToolArgs(value, allowed, required = []) {
   return value;
 }
 
+// A string argument, optionally allowed empty or limited to a set of values.
 function stringArg(args, name, options = {}) {
   const value = args[name];
   if (value === undefined && options.optional) return undefined;
@@ -2651,20 +2968,25 @@ function stringArg(args, name, options = {}) {
   return value;
 }
 
+// A boolean argument, with a default when absent.
 function booleanArg(args, name, defaultValue = false) {
   if (args[name] === undefined) return defaultValue;
   if (typeof args[name] !== 'boolean') throw new Error(name + ' must be a boolean');
   return args[name];
 }
 
+// A board path argument, cleaned like every other path.
 function cleanToolPath(args, name) {
   const value = cleanPath(stringArg(args, name));
   if (!value) throw new Error('Bad path: ' + name);
   return value;
 }
 
+// One board as MCP clients see it: stable board_id (UID, else the device path),
+// firmware, model, capabilities, and install details for boards in install mode.
 function boardRecord(device) {
   const record = {
+    // The UID survives a board moving to another serial port; the device path does not.
     board_id: device.uid || device.dev,
     device: device.dev,
     connected: true,
@@ -2674,6 +2996,7 @@ function boardRecord(device) {
     model: device.machine || device.label || null,
     version: device.release || null,
     uid: device.uid || null,
+    // null when unknown (still identifying or failed).
     read_only: device.readOnly === undefined ? null : !!device.readOnly,
     capabilities: device.capabilities || null,
     error: device.error || null,
@@ -2691,6 +3014,7 @@ function boardRecord(device) {
   return record;
 }
 
+// The BOOTSEL drive a board_id names; errors when none or several match.
 async function resolveBootselBoardId(boardId) {
   const wanted = String(boardId || '');
   if (!wanted) throw new Error('board_id must be a non-empty string');
@@ -2701,10 +3025,13 @@ async function resolveBootselBoardId(boardId) {
   return matches[0];
 }
 
+// pico_install "check" for a BOOTSEL drive: mounts it if possible (or returns the mount
+// command for the user to run), then asks whether it is a W model.
 async function checkBootselInstall(boardId, firmware) {
   if (firmware !== 'micropython') throw new Error('Unsupported firmware: ' + firmware);
   const device = await resolveBootselBoardId(boardId);
   let root = device.mountRoot;
+  // Try to mount it; when the Pi needs permission, return the command for the user.
   if (!root && process.platform === 'linux' && !bootselDeviceOverride) {
     try { root = await mountedBootselRoot(device); }
     catch (error) {
@@ -2729,6 +3056,7 @@ async function checkBootselInstall(boardId, firmware) {
     throw new Error('Could not mount the BOOTSEL volume');
   }
   fs.accessSync(root, fs.constants.W_OK);
+  // Ready: the client must ask whether this is a W model.
   const models = bootselFirmwareOptions(device.machine).map(option => ({
     wifi: / W$/.test(option.name), name: option.name,
   }));
@@ -2739,6 +3067,7 @@ async function checkBootselInstall(boardId, firmware) {
   };
 }
 
+// The ESP32 in download mode a board_id names.
 async function resolveEspDownloadBoardId(boardId) {
   const wanted = String(boardId || '');
   if (!wanted) throw new Error('board_id must be a non-empty string');
@@ -2750,6 +3079,7 @@ async function resolveEspDownloadBoardId(boardId) {
   return matches[0];
 }
 
+// pico_install "check" for an ESP32: confirms the chip is supported and unprotected.
 async function checkEspInstall(boardId, firmware) {
   if (firmware !== 'micropython') throw new Error('Unsupported firmware: ' + firmware);
   const device = await resolveEspDownloadBoardId(boardId);
@@ -2760,12 +3090,14 @@ async function checkEspInstall(boardId, firmware) {
   };
 }
 
+// The BOOTSEL firmware id for a chip and the W answer.
 function micropythonFirmwareId(chip, wifi) {
   if (chip === 'RP2040') return wifi ? 'pico-w' : 'pico';
   if (chip === 'RP2350') return wifi ? 'pico2-w' : 'pico2';
   throw new Error('Unsupported BOOTSEL chip: ' + chip);
 }
 
+// The device path of a running, identified board named by board_id.
 async function resolveBoardId(boardId) {
   const wanted = String(boardId || '');
   if (!wanted) throw new Error('board_id must be a non-empty string');
@@ -2778,6 +3110,7 @@ async function resolveBoardId(boardId) {
   return matches[0].dev;
 }
 
+// File content from a tool call: UTF-8 text, or strictly valid base64.
 function decodeMcpContent(content, encoding) {
   if (encoding === 'utf8') return Buffer.from(content, 'utf8');
   if (content.length % 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(content)) {
@@ -2786,6 +3119,7 @@ function decodeMcpContent(content, encoding) {
   return Buffer.from(content, 'base64');
 }
 
+// Shared JSON Schema pieces and annotations for the tool definitions below.
 const boardIdProperty = {
   type: 'string',
   description: 'Stable board UID returned by pico_boards_list, or its current serial device path.',
@@ -2798,8 +3132,11 @@ const readOnlyAnnotations = { readOnlyHint: true, destructiveHint: false, openWo
 const additiveAnnotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const destructiveAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
 
+// The MCP tools: name, schema and annotations for tools/list, and the handler that
+// validates arguments and calls the same functions the web API uses.
 const MCP_TOOLS = [
   {
+    // Every connected board, including boards in install mode.
     name: 'pico_boards_list',
     title: 'List connected boards',
     description: 'List connected Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython and report their capabilities. Use board_id from this result in every other tool.',
@@ -2811,6 +3148,8 @@ const MCP_TOOLS = [
     },
   },
   {
+    // MicroPython install for a BOOTSEL Pico or an ESP32 in download mode: "check" reports
+    // readiness (mount command, W question), "install" needs confirmed=true.
     name: 'pico_install',
     title: 'Install firmware on a bootloader-mode board',
     description: 'Install MicroPython on a Pico in BOOTSEL mode or a supported ESP32 in DOWNLOAD mode. Always call action check first. A Pico may require mounting and a Wi-Fi model choice. An ESP32 uses the detected chip-specific generic build. Obtain explicit confirmation before calling action install.',
@@ -2836,17 +3175,21 @@ const MCP_TOOLS = [
       const action = stringArg(args, 'action', { values: ['check', 'install'] });
       const firmware = stringArg(args, 'firmware', { values: ['micropython'] });
       let bootselDevice = null;
+      // A board_id that is not a BOOTSEL drive is looked up as an ESP32 in download mode.
       try { bootselDevice = await resolveBootselBoardId(boardId); }
       catch { /* The requested board may be an ESP serial bootloader. */ }
+      // Check first; install only when the check says ready.
       const readiness = bootselDevice
         ? await checkBootselInstall(boardId, firmware)
         : await checkEspInstall(boardId, firmware);
       if (action === 'check' || readiness.status !== 'ready') {
         return mcpToolResult({ board_id: boardId, ...readiness });
       }
+      // Installing replaces the firmware, so the client must confirm with the user first.
       if (args.confirmed !== true) throw new Error('confirmed must be true after explicit user confirmation');
       if (readiness.bootloader === 'esp-rom') {
         const device = await resolveEspDownloadBoardId(boardId);
+        // ESP32: erase the filesystem too unless the client said not to.
         const install = espInstallOverride || installEspFirmware;
         const initializeStorage = args.initialize_storage === undefined
           ? true : booleanArg(args, 'initialize_storage');
@@ -2860,8 +3203,10 @@ const MCP_TOOLS = [
           message: 'Firmware was verified and installed. The board should reboot and reconnect automatically.',
         });
       }
+      // A Pico's W variant cannot be detected, so the client must say which it is.
       if (args.wifi === undefined) throw new Error('wifi is required for Pico action install');
       const wifi = booleanArg(args, 'wifi');
+      // Pico: install the UF2 for the chip and W answer.
       const firmwareId = micropythonFirmwareId(readiness.chip, wifi);
       const install = bootselInstallOverride || installBootselFirmware;
       const device = await resolveBootselBoardId(boardId);
@@ -2875,6 +3220,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // The file tree plus Flash and RAM usage.
     name: 'pico_files_list',
     title: 'List board files',
     description: 'List the complete board filesystem and report Flash and RAM usage. Hidden system files are omitted unless include_system is true.',
@@ -2887,12 +3233,14 @@ const MCP_TOOLS = [
     handler: async (raw) => {
       const args = validateToolArgs(raw, ['board_id', 'include_system'], ['board_id']);
       const dev = await resolveBoardId(stringArg(args, 'board_id'));
+      // Usage is best-effort: a board that cannot report it still lists its files.
       const files = await listFiles(dev, booleanArg(args, 'include_system'));
       const stats = await deviceStats(dev).catch(() => null);
       return mcpToolResult({ board_id: args.board_id, files, stats });
     },
   },
   {
+    // One file, as UTF-8 text when it is text, else base64.
     name: 'pico_file_read',
     title: 'Read a board file',
     description: 'Read one board file. auto returns UTF-8 text when safe and base64 for binary data; utf8 forces text; base64 always returns base64.',
@@ -2912,6 +3260,7 @@ const MCP_TOOLS = [
       const file = cleanToolPath(args, 'path');
       const encoding = stringArg(args, 'encoding', { optional: true, values: ['auto', 'utf8', 'base64'] }) || 'auto';
       const buf = await readFile(dev, file);
+      // "auto" returns text only when the file really is text.
       const text = encoding === 'base64' ? null : asText(buf);
       const binary = encoding === 'base64' || (encoding === 'auto' && text === null);
       return mcpToolResult({
@@ -2922,6 +3271,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Creates or overwrites one file, up to 8 MB.
     name: 'pico_file_write',
     title: 'Write a board file',
     description: 'Create or overwrite one board file, creating missing parent directories. content may be UTF-8 text or base64 and is limited to 8 MB decoded.',
@@ -2942,6 +3292,7 @@ const MCP_TOOLS = [
       const file = cleanToolPath(args, 'path');
       const content = stringArg(args, 'content', { allowEmpty: true });
       const encoding = stringArg(args, 'encoding', { optional: true, values: ['utf8', 'base64'] }) || 'utf8';
+      // The decoded size counts against the 8 MB limit, not the encoded length.
       const buf = decodeMcpContent(content, encoding);
       if (buf.length > 8 * 1024 * 1024) throw new Error('content exceeds the 8 MB write limit');
       const result = await writeFile(dev, file, buf);
@@ -2949,6 +3300,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Creates one folder.
     name: 'pico_directory_create',
     title: 'Create a board directory',
     description: 'Create one directory on the selected board.',
@@ -2967,6 +3319,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Renames or moves a file or folder.
     name: 'pico_path_rename',
     title: 'Rename or move a board path',
     description: 'Rename or move one file or directory on the selected board.',
@@ -2986,6 +3339,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Deletes a file, or a folder and its contents.
     name: 'pico_path_delete',
     title: 'Delete a board path',
     description: 'Permanently delete one file or recursively delete one directory from the selected board.',
@@ -3004,6 +3358,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Runs a file as __main__, or a code snippet, and returns its output.
     name: 'pico_python_run',
     title: 'Run Python on a board',
     description: 'Run a Python file as __main__ or execute Python code. Provide exactly one of path or code. This can change any state accessible to code on the board.',
@@ -3027,6 +3382,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Ctrl-C for a running program.
     name: 'pico_board_interrupt',
     title: 'Interrupt a board program',
     description: 'Send Ctrl-C to interrupt the program currently running on the selected board.',
@@ -3042,6 +3398,7 @@ const MCP_TOOLS = [
     },
   },
   {
+    // Soft or hard reset.
     name: 'pico_board_reset',
     title: 'Reset a board',
     description: 'Soft-reset the selected board, or hard-reset it when the firmware supports hard reset.',
@@ -3054,17 +3411,20 @@ const MCP_TOOLS = [
     handler: async (raw) => {
       const args = validateToolArgs(raw, ['board_id', 'mode'], ['board_id']);
       const dev = await resolveBoardId(stringArg(args, 'board_id'));
+      // Soft by default.
       const mode = stringArg(args, 'mode', { optional: true, values: ['soft', 'hard'] }) || 'soft';
       return mcpToolResult({ board_id: args.board_id, mode, ...await resetBoard(dev, mode === 'hard') });
     },
   },
 ];
 
+// True when a request carries the current protocol revision in its _meta.
 function modernMcpRequest(msg) {
   return msg && msg.params && msg.params._meta &&
     msg.params._meta['io.modelcontextprotocol/protocolVersion'] === MCP_PROTOCOL;
 }
 
+// Current-revision replies are marked complete and carry the server info.
 function completeMcpResult(result, modern) {
   if (!modern) return result;
   return {
@@ -3074,6 +3434,8 @@ function completeMcpResult(result, modern) {
   };
 }
 
+// Handles one JSON-RPC message for either transport: server/discover, initialize,
+// ping, tools/list and tools/call. Returns the reply, or null for a notification.
 async function dispatchMcp(msg) {
   const id = msg && msg.id;
   const isRequest = id !== undefined && id !== null;
@@ -3083,11 +3445,13 @@ async function dispatchMcp(msg) {
     error: { code, message, ...(data === undefined ? {} : { data }) },
   });
 
+  // Not JSON-RPC 2.0 at all.
   if (!msg || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string') {
     return isRequest ? fail(-32600, 'Invalid Request') : null;
   }
   const params = msg.params && typeof msg.params === 'object' ? msg.params : {};
   const metadata = params._meta && typeof params._meta === 'object' ? params._meta : {};
+  // A current-revision request names its version and the client's capabilities in _meta.
   const requestedVersion = metadata['io.modelcontextprotocol/protocolVersion'];
   const modern = msg.method === 'server/discover' || modernMcpRequest(msg);
   if (requestedVersion && requestedVersion !== MCP_PROTOCOL) {
@@ -3098,6 +3462,7 @@ async function dispatchMcp(msg) {
     return isRequest ? fail(-32602, 'Modern MCP requests require clientCapabilities metadata') : null;
   }
   try {
+    // Current revision: what this server supports, cacheable for 5 minutes.
     if (msg.method === 'server/discover') {
       return ok({
         resultType: 'complete',
@@ -3109,6 +3474,7 @@ async function dispatchMcp(msg) {
         _meta: { 'io.modelcontextprotocol/serverInfo': MCP_SERVER_INFO },
       });
     }
+    // Older revisions: answer with the client's version when supported, else the newest.
     if (msg.method === 'initialize') {
       const requested = params.protocolVersion;
       const protocolVersion = MCP_LEGACY_PROTOCOLS.includes(requested) ? requested : MCP_LEGACY_PROTOCOLS[0];
@@ -3121,18 +3487,21 @@ async function dispatchMcp(msg) {
     }
     if (msg.method === 'ping') return ok(completeMcpResult({}, modern));
     if (msg.method === 'tools/list') {
+      // pico_install is listed last.
       const tools = MCP_TOOLS
         .filter(tool => tool.name !== 'pico_install')
         .concat(MCP_TOOLS.filter(tool => tool.name === 'pico_install'))
         .map(({ handler, ...tool }) => tool);
       return ok(completeMcpResult({ tools, ttlMs: 300000, cacheScope: 'public' }, modern));
     }
+    // Runs one tool by name.
     if (msg.method === 'tools/call') {
       if (typeof params.name !== 'string') return isRequest ? fail(-32602, 'Tool name is required') : null;
       const tool = MCP_TOOLS.find(entry => entry.name === params.name);
       if (!tool) return isRequest ? fail(-32602, 'Unknown tool: ' + params.name) : null;
       let result;
       try {
+        // A tool error becomes an isError result, not a protocol error.
         result = await tool.handler(params.arguments || {});
       } catch (error) {
         result = mcpToolResult({ error: String(error.message || error) }, true);
@@ -3146,13 +3515,17 @@ async function dispatchMcp(msg) {
   }
 }
 
+// MCP over stdio: one JSON message per line, replies written in order, and shutdown
+// once stdin closes and every pending call has answered.
 function runMcpStdio() {
   // stdout belongs exclusively to MCP. Redirect incidental informational output to stderr.
+  // Anything logged goes to stderr instead.
   console.log = (...values) => console.error(...values);
   console.info = (...values) => console.error(...values);
   const rl = readline.createInterface({ input: process.stdin });
   const active = new Set();
   let writes = Promise.resolve();
+  // Replies are written one at a time, in the order they finish.
   const write = response => {
     if (!response) return;
     writes = writes.then(() => new Promise(resolve => {
@@ -3176,6 +3549,7 @@ function runMcpStdio() {
     }).finally(() => active.delete(task));
     active.add(task);
   });
+  // stdin closed: let pending calls answer, then exit.
   rl.on('close', async () => {
     await Promise.allSettled([...active]);
     await writes;
@@ -3183,6 +3557,7 @@ function runMcpStdio() {
   });
 }
 
+// An Mcp-Name header value, which may be sent base64-encoded as =?base64?...?=.
 function decodeMcpHeader(value) {
   if (typeof value !== 'string') return null;
   const encoded = /^=\?base64\?([A-Za-z0-9+/]*={0,2})\?=$/.exec(value);
@@ -3198,6 +3573,7 @@ function validMcpOrigin(req) {
   catch { return false; }
 }
 
+// An HTTP error carrying a JSON-RPC error body.
 function mcpHttpError(res, status, id, code, message, data) {
   sendJSON(res, status, {
     jsonrpc: '2.0', id: id === undefined ? null : id,
@@ -3207,6 +3583,9 @@ function mcpHttpError(res, status, id, code, message, data) {
 
 let mcpHttpActive = 0;
 
+// Streamable HTTP MCP at POST /mcp: checks Origin and body size, requires the
+// current revision's Mcp-* headers to match the body, accepts the older revisions,
+// allows at most 8 tool calls at once, and answers plain JSON (no SSE).
 async function handleMcpHttp(req, res) {
   if (!validMcpOrigin(req)) {
     mcpHttpError(res, 403, null, -32020, 'Invalid Origin header');
@@ -3225,6 +3604,7 @@ async function handleMcpHttp(req, res) {
     return;
   }
 
+  // The current revision repeats the method and name in headers; they must match the body.
   const version = req.headers['mcp-protocol-version'];
   const bodyVersion = msg && msg.params && msg.params._meta &&
     msg.params._meta['io.modelcontextprotocol/protocolVersion'];
@@ -3246,6 +3626,7 @@ async function handleMcpHttp(req, res) {
     return;
   }
 
+  // At most 8 tool calls run at once; more get 429.
   const toolCall = msg && msg.method === 'tools/call';
   if (toolCall && mcpHttpActive >= 8) {
     mcpHttpError(res, 429, msg.id, -32000, 'Too many concurrent MCP tool calls');
@@ -3260,13 +3641,90 @@ async function handleMcpHttp(req, res) {
     res.end();
     return;
   }
+  // The current revision answers an unknown method with 404.
   const unknownModernMethod = modern && response.error && response.error.code === -32601;
   sendJSON(res, unknownModernMethod ? 404 : 200, response);
 }
 
+// ── ctrlPi API install ──────────────────────────────────────────────────────────
+// "Install ctrlPi API" puts pico-gpio-api on a Pico W / Pico 2 W: main.py from the
+// project's GitHub release branch, plus config.json, wifi.txt and a sample sensor.
+
+const CTRLPI_MAIN_URL = 'https://raw.githubusercontent.com/ctrlpi/pico-gpio-api/main/main.py';
+const CTRLPI_CPU_TEMP = `# CPU temperature in degrees Celsius, as a bare number (e.g. 23.4), not JSON.
+# Use it as a sensor: POST /sensor/config/cpu_temp {"script": "cpu-temp.py"}
+import machine
+
+def read():
+    v = machine.ADC(4).read_u16() * 3.3 / 65535
+    return round(27 - (v - 0.706) / 0.001721, 1)
+`;
+
+// An Error that the HTTP handler answers with `status` instead of 500.
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+// The files the install writes besides main.py, as [path, text] pairs. An existing
+// config.json keeps every setting (pins, sensors, bridges) and only takes the new key
+// and name; scripts/cpu-temp.py is written only when the board has none.
+function ctrlpiInstallFiles(form, existing = {}) {
+  // The form's fields; key and SSID are required, and none may contain a line break.
+  const key = String(form?.key ?? '').trim();
+  const name = String(form?.name ?? '').trim();
+  const ssid = String(form?.ssid ?? '');
+  const pass = String(form?.pass ?? '');
+  if (!key) throw httpError(400, 'API key is required');
+  if (!ssid) throw httpError(400, 'WiFi SSID is required');
+  for (const [label, value] of [['API key', key], ['Agent name', name], ['WiFi SSID', ssid], ['WiFi password', pass]]) {
+    if (/[\r\n]/.test(value)) throw httpError(400, label + ' cannot contain a line break');
+  }
+  // Start from the board's own config when it parses as a JSON object.
+  let config = {};
+  if (existing.config != null) {
+    try {
+      const parsed = JSON.parse(existing.config);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
+    } catch { /* unreadable config: start a fresh one */ }
+  }
+  config.api_key = key;
+  if (name) config.name = name;
+  else delete config.name;  // a blank name means the agent's own pico-<serial4> default
+  const files = [
+    ['config.json', JSON.stringify(config, null, 2) + '\n'],
+    ['wifi.txt', 'SSID = ' + ssid + '\nPASSWORD = ' + pass + '\n'],
+  ];
+  if (!existing.hasCpuTemp) files.push(['scripts/cpu-temp.py', CTRLPI_CPU_TEMP]);
+  return files;
+}
+
+// The checks the agent's own /upgrade makes on a downloaded main.py; null when it passes.
+function ctrlpiMainError(text) {
+  if (text.length < 10 * 1024 || text.length > 512 * 1024) return 'unexpected size (' + text.length + ' bytes)';
+  const head = text.slice(0, 256);
+  if (!head.includes('main.py') || !head.includes('import')) return 'banner or imports missing';
+  if (text.includes('\0')) return 'binary data in file';
+  if (!/\nmain\(\)\s*$/.test(text)) return 'trailing main() call missing';
+  return null;
+}
+
+// Downloads pico-gpio-api's main.py, with a 30 s limit, and checks it.
+async function downloadCtrlpiMain() {
+  const response = await fetch(CTRLPI_MAIN_URL, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw httpError(502, 'main.py download failed (HTTP ' + response.status + ')');
+  const text = await response.text();
+  const problem = ctrlpiMainError(text);
+  if (problem) throw httpError(502, 'Downloaded main.py failed its check: ' + problem);
+  return text;
+}
+
 // ── Routing ─────────────────────────────────────────────────────────────────
+// The web UI, the JSON API used by page.html, and /mcp when HTTP MCP is enabled.
 function createServer(options = {}) {
   const logDevices = options.logDevices !== false;
+  // Logs a failed request with the board it was for (silent under stdio MCP).
   const reportError = (operation, dev, error) => {
     if (mcpStdio || options.logErrors === false) return;
     const machine = ports.get(dev)?.info?.machine;
@@ -3275,15 +3733,21 @@ function createServer(options = {}) {
       String(error.message || error);
     (options.errorLogger || console.error)(line.replace(/[\r\n]+/g, ' '));
   };
+  // The UI can switch HTTP MCP on and off while running. The installers and the main.py
+  // download can be replaced through options, which is how the tests run without boards.
   let enableMcp = options.mcpHttp === true;
   const installBootsel = options.installBootsel || installBootselFirmware;
   const installEsp = options.installEsp || installEspFirmware;
   const initializeStorage = options.initializeStorage || initializeEspStorage;
+  const fetchCtrlpiMain = options.fetchCtrlpiMain || downloadCtrlpiMain;
+  const allowHosts = options.allowHosts || ALLOW_HOSTS;
+  // Background install jobs by id, and the running job per device (one at a time).
   const bootselJobs = new Map();
   const bootselJobByDevice = new Map();
   const espJobs = new Map();
   const espJobByDevice = new Map();
 
+  // The fields of an install job the UI polls for.
   const publicInstallJob = job => ({
     id: job.id, dev: job.dev, status: job.status, stage: job.stage,
     percent: job.percent, firmwareId: job.firmwareId || null,
@@ -3291,12 +3755,16 @@ function createServer(options = {}) {
     initializeStorage: !!job.initializeStorage,
     error: job.error || null, result: job.result || null,
   });
+  // A finished job frees its device and is kept 10 minutes for the UI to read its result.
   const finishJob = (jobs, jobsByDevice, job) => {
     jobsByDevice.delete(job.dev);
     const cleanup = setTimeout(() => jobs.delete(job.id), 10 * 60 * 1000);
     cleanup.unref?.();
   };
+  // Starts a BOOTSEL install in the background (or returns the one already running) and
+  // records its stage and percent as it goes.
   const startBootselJob = (dev, firmwareId, firmwareName) => {
+    // A second request while one install runs just returns that job.
     const activeId = bootselJobByDevice.get(dev);
     const active = activeId && bootselJobs.get(activeId);
     if (active && active.status === 'running') return active;
@@ -3313,6 +3781,7 @@ function createServer(options = {}) {
       job.percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
       job.updatedAt = Date.now();
     };
+    // The install runs in the background; the route returns the job at once.
     void Promise.resolve().then(() => installBootsel(dev, firmwareId, downloadFirmware, update)).then(result => {
       job.status = 'complete';
       job.stage = 'complete';
@@ -3330,7 +3799,9 @@ function createServer(options = {}) {
     });
     return job;
   };
+  // The same for an ESP32 install, optionally erasing the filesystem afterwards.
   const startEspJob = (dev, initializeStorage) => {
+    // A second request while one install runs just returns that job.
     const activeId = espJobByDevice.get(dev);
     const active = activeId && espJobs.get(activeId);
     if (active && active.status === 'running') return active;
@@ -3347,6 +3818,7 @@ function createServer(options = {}) {
       job.percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
       job.updatedAt = Date.now();
     };
+    // The install runs in the background; the route returns the job at once.
     void Promise.resolve().then(() => installEsp(
       dev, downloadFirmware, update, { initializeStorage },
     )).then(result => {
@@ -3372,6 +3844,16 @@ function createServer(options = {}) {
   const q = Object.fromEntries(parsed.searchParams);
 
   try {
+    // Every route, MCP included, answers only requests addressed to an allowed host.
+    if (!hostAllowed(req.headers.host, allowHosts)) {
+      const name = String(req.headers.host || '').replace(/:\d+$/, '').slice(0, 100);
+      sendJSON(res, 403, {
+        error: 'Host not allowed: ' + name + '. Open pico-bay by IP address, or start it with --allow-host ' + name,
+      });
+      return;
+    }
+
+    // Streamable HTTP MCP, when enabled.
     if (p === '/mcp' && enableMcp) {
       await handleMcpHttp(req, res);
       return;
@@ -3388,6 +3870,7 @@ function createServer(options = {}) {
       if (foreignOrigin) { sendJSON(res, 403, { error: 'Cross-origin request rejected' }); return; }
     }
 
+    // The single-page UI, the README for its full-screen view, and the license.
     if (p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PAGE);
@@ -3409,6 +3892,8 @@ function createServer(options = {}) {
       return;
     }
 
+    // The device list the UI polls. A manual Scan first clears cached probes so every
+    // running board is identified again (boards in install mode and installs are kept).
     if (p === '/api/devices') {
       if (q.manual === '1') {
         console.log('scanning for devices…');
@@ -3423,6 +3908,7 @@ function createServer(options = {}) {
       const list = await scanDevices({ waitForProbes: false });
       if (logDevices) logDeviceChanges(list);
       sendJSON(res, 200, {
+        // Each device carries its install mode and any running install job.
         devices: list.map(device => {
           device = { ...device, bootloaderMode: bootloaderMode(device) };
           const job = bootselJobs.get(bootselJobByDevice.get(device.dev)) ||
@@ -3438,6 +3924,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Switches HTTP MCP on (enabled=1) or off (enabled=0).
     if (p === '/api/mcp' && req.method === 'POST') {
       if (!['0', '1'].includes(q.enabled)) {
         sendJSON(res, 400, { error: 'enabled must be 0 or 1' });
@@ -3448,11 +3935,14 @@ function createServer(options = {}) {
       return;
     }
 
+    // Starts a MicroPython install on a BOOTSEL drive; the UI polls the status route.
     if (p === '/api/bootsel/install' && req.method === 'POST') {
+      // The device must still be present.
       if (!q.dev) {
         sendJSON(res, 404, { error: 'BOOTSEL device is no longer connected' });
         return;
       }
+      // The firmware id must be one of the known Pico models.
       const firmware = BOOTSEL_FIRMWARE[q.firmware];
       if (!firmware) {
         sendJSON(res, 400, { error: 'Unknown firmware selection' });
@@ -3463,6 +3953,7 @@ function createServer(options = {}) {
     }
 
     if (p === '/api/bootsel/install/status' && req.method === 'GET') {
+      // Install progress for the page to poll.
       const job = bootselJobs.get(q.id);
       if (!job) {
         sendJSON(res, 404, { error: 'BOOTSEL installation job was not found' });
@@ -3472,6 +3963,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Starts a MicroPython install on an ESP32 in download mode; polled the same way.
     if (p === '/api/esp/install' && req.method === 'POST') {
       if (q.confirmed !== '1') {
         sendJSON(res, 400, { error: 'Installation must be confirmed' });
@@ -3486,6 +3978,7 @@ function createServer(options = {}) {
     }
 
     if (p === '/api/esp/install/status' && req.method === 'GET') {
+      // Install progress for the page to poll.
       const job = espJobs.get(q.id);
       if (!job) {
         sendJSON(res, 404, { error: 'ESP32 installation job was not found' });
@@ -3495,8 +3988,10 @@ function createServer(options = {}) {
       return;
     }
 
+    // The live console as Server-Sent Events.
     if (p === '/api/console') {
       const dev = q.dev;
+      // The console needs a connected board.
       if (!dev || !listDevs().includes(dev)) { res.writeHead(404); res.end(); return; }
       await attachConsole(dev, res);
       return;
@@ -3504,16 +3999,19 @@ function createServer(options = {}) {
 
     // Everything below needs a live board.
     const dev = q.dev;
+    // Every route below works on a connected board named by ?dev=.
     if (p.startsWith('/api/')) {
       if (!dev || !listDevs().includes(dev)) { sendJSON(res, 404, { error: 'Board not connected' }); return; }
     }
 
+    // The board's file tree with Flash and RAM usage.
     if (p === '/api/files') {
       const [files, stats] = [await listFiles(dev, q.system === '1'), await deviceStats(dev).catch(() => null)];
       sendJSON(res, 200, { files, stats });
       return;
     }
 
+    // Creates the filesystem on an ESP32 whose storage was never initialized.
     if (p === '/api/storage/initialize' && req.method === 'POST') {
       if (q.confirmed !== '1') {
         sendJSON(res, 400, { error: 'Storage initialization must be confirmed' });
@@ -3523,6 +4021,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Reads a file: as a download, or as JSON with its text (binary files flagged).
     if (p === '/api/file' && req.method === 'GET') {
       const file = cleanPath(q.path);
       if (!file) { sendJSON(res, 400, { error: 'Bad path' }); return; }
@@ -3542,6 +4041,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Writes the request body to a file (upload, editor save).
     if (p === '/api/file' && (req.method === 'PUT' || req.method === 'POST')) {
       await requireWritable(dev);
       const file = cleanPath(q.path);
@@ -3551,6 +4051,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Deletes a file or folder.
     if (p === '/api/file' && req.method === 'DELETE') {
       await requireWritable(dev);
       const file = cleanPath(q.path);
@@ -3559,6 +4060,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Creates a folder and any missing parents.
     if (p === '/api/mkdir' && req.method === 'POST') {
       await requireWritable(dev);
       const file = cleanPath(q.path);
@@ -3567,6 +4069,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Creates an empty file.
     if (p === '/api/touch' && req.method === 'POST') {
       await requireWritable(dev);
       const file = cleanPath(q.path);
@@ -3575,6 +4078,7 @@ function createServer(options = {}) {
       return;
     }
 
+    // Renames or moves a file or folder.
     if (p === '/api/rename' && req.method === 'POST') {
       await requireWritable(dev);
       const from = cleanPath(q.path), to = cleanPath(q.to);
@@ -3583,7 +4087,9 @@ function createServer(options = {}) {
       return;
     }
 
+    // Downloads every file on the board as one ZIP named after the board and the date.
     if (p === '/api/zip' || p === '/api/download-all') {
+      // Read every file, including hidden ones, into the archive.
       const files = await listFiles(dev, true);
       const entries = [];
       for (const f of files) {
@@ -3603,6 +4109,7 @@ function createServer(options = {}) {
       } catch {
         devName = path.basename(dev).replace(/[^a-zA-Z0-9_-]/g, '_');
       }
+      // Named after the board and today's date, e.g. Pico_W_2026-10-18.zip.
       const today = new Date().toISOString().slice(0, 10);
       const zipName = devName + '_' + today + '.zip';
 
@@ -3616,8 +4123,10 @@ function createServer(options = {}) {
       return;
     }
 
+    // Writes every file of an uploaded ZIP to the board (other files are left alone).
     if (p === '/api/restore' && req.method === 'POST') {
       await requireWritable(dev);
+      // The archive is checked in full before the first file is written.
       const entries = parseRestoreZip(await readBody(req, 16 * 1024 * 1024));
       const restored = [];
       for (const entry of entries) {
@@ -3628,13 +4137,16 @@ function createServer(options = {}) {
       return;
     }
 
+    // Deletes every file on the board ("Delete all files").
     if (p === '/api/clean' && req.method === 'POST') {
       await requireWritable(dev);
       sendJSON(res, 200, await cleanAll(dev));
       return;
     }
 
+    // Runs a file (?path=) or the posted console line, streaming to the console.
     if (p === '/api/run' && req.method === 'POST') {
+      // A file to run (?path=), or the posted body as one console line.
       const options = q.path
         ? { path: q.path }
         : { code: (await readBody(req)).toString('utf8') };
@@ -3642,64 +4154,57 @@ function createServer(options = {}) {
       return;
     }
 
+    // Sends Ctrl-C to the running program.
     if (p === '/api/interrupt' && req.method === 'POST') {
       sendJSON(res, 200, await interruptBoard(dev));
       return;
     }
 
+    // "Install ctrlPi API" (see ctrlpiInstallFiles).
     if (p === '/api/ctrlpi/install' && req.method === 'POST') {
       await requireWritable(dev);
-      const body = JSON.parse(await readBody(req));
-      
-      const configJson = `{\n  "api_key": "${body.key}",\n  "name": "${body.name || ''}"\n}`;
-      const wifiTxt = `SSID = ${body.ssid}\nPASSWORD = ${body.pass}\n`;
-      const cpuTempScript = `# CPU temperature in degrees Celsius, as a bare number (e.g. 23.4), not JSON.
-# Use it as a sensor: POST /sensor/config/cpu_temp {"script": "cpu-temp.py"}
-import machine
-
-def read():
-    v = machine.ADC(4).read_u16() * 3.3 / 65535
-    return round(27 - (v - 0.706) / 0.001721, 1)
-`;
-
-      const response = await fetch('https://npm.ctrlpi.com/ctrlpi/pico-gpio-api/main.py');
-      if (!response.ok) throw new Error('Failed to download main.py from server (HTTP ' + response.status + ')');
-      const mainPy = await response.text();
-
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch { throw httpError(400, 'Invalid JSON body'); }
+      // What the board already has: its config is kept, its sensor script is not replaced.
+      const existingPaths = new Set((await listFiles(dev, true)).map(f => String(f.path).replace(/^\//, '')));
+      const existing = {
+        config: existingPaths.has('config.json') ? (await readFile(dev, 'config.json')).toString('utf8') : null,
+        hasCpuTemp: existingPaths.has('scripts/cpu-temp.py'),
+      };
+      // Validate the form and fetch main.py before anything on the board is written.
+      const files = ctrlpiInstallFiles(body, existing);
+      const mainPy = await fetchCtrlpiMain();
       await writeFile(dev, 'main.py', Buffer.from(mainPy));
-      await writeFile(dev, 'config.json', Buffer.from(configJson));
-      await writeFile(dev, 'wifi.txt', Buffer.from(wifiTxt));
-      
-      try {
-        await mkdir(dev, 'scripts');
-      } catch(e) {}
-      await writeFile(dev, 'scripts/cpu-temp.py', Buffer.from(cpuTempScript));
-      
+      for (const [file, text] of files) await writeFile(dev, file, Buffer.from(text));
       await resetBoard(dev, false);
-      sendJSON(res, 200, { ok: true });
+      sendJSON(res, 200, { ok: true, keptConfig: existing.config !== null });
       return;
     }
 
+    // Soft reset, or hard reset with ?hard=1.
     if (p === '/api/reset' && req.method === 'POST') {
       sendJSON(res, 200, await resetBoard(dev, q.hard === '1'));
       return;
     }
 
+    // Sends the board to BOOTSEL or ESP download mode.
     if (p === '/api/bootloader' && req.method === 'POST') {
-      sendJSON(res, 200, await enterBootloader(dev));
+      sendJSON(res, 200, await enterBootloader(dev, q.mode));
       return;
     }
 
+    // Anything else is unknown.
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
   } catch (e) {
     if (p !== '/mcp') reportError(req.method + ' ' + p, q.dev, e);
-    if (!res.headersSent) sendJSON(res, 500, { error: String(e.message || e) });
+    if (!res.headersSent) sendJSON(res, e.status || 500, { error: String(e.message || e) });
     else try { res.end(); } catch { /* already closed */ }
   }
   });
 }
 
+// Opens the UI in the default browser.
 function openBrowser(url) {
   const plat = process.platform;
   if (plat === 'darwin') {
@@ -3711,6 +4216,8 @@ function openBrowser(url) {
   }
 }
 
+// The process listening on a TCP port (netstat on Windows, lsof elsewhere), for the
+// "port in use" message.
 function findPortOwner(port) {
   if (process.platform === 'win32') {
     try {
@@ -3732,6 +4239,7 @@ function findPortOwner(port) {
   } catch { return null; }
 }
 
+// Startup message for a busy port: who holds it, how to stop it, or another port to use.
 function portInUseLines(host, port, owner) {
   const lines = ['Port is already in use: ' + host + ':' + port];
   if (owner) {
@@ -3747,6 +4255,8 @@ function portInUseLines(host, port, owner) {
   return lines;
 }
 
+// The addresses to print at startup: localhost, the given host, or every LAN IPv4
+// address when listening on all interfaces.
 function startupUrls(host, port, interfaces = os.networkInterfaces()) {
   const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
   if (loopback) return ['http://localhost:' + port];
@@ -3765,6 +4275,8 @@ function startupUrls(host, port, interfaces = os.networkInterfaces()) {
     : ['http://localhost:' + port];
 }
 
+// Starts the web server, prints where it listens, scans once for boards, and opens the
+// browser unless that is disabled.
 function startServer(options = {}) {
   const server = createServer(options);
   server.once('error', (error) => {
@@ -3778,6 +4290,7 @@ function startServer(options = {}) {
     process.exitCode = 1;
   });
   server.listen(PORT, HOST, () => {
+  // Print every address the UI can be opened at.
   const actualPort = server.address().port;
   const localAddr = 'http://localhost:' + actualPort;
   const addresses = startupUrls(HOST, actualPort);
@@ -3788,8 +4301,9 @@ function startServer(options = {}) {
   console.log(bar);
   if (options.mcpHttp) console.log('MCP endpoint: ' + addresses[0] + '/mcp');
   if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
-    console.log('listening on ' + HOST + ' — ensure this interface is trusted');
+    console.log('listening on ' + HOST + '; ensure this interface is trusted');
   }
+  // Log the boards present at startup.
   scanDevices().then(logDeviceChanges).catch(e => {
     console.log('device scan failed: ' + String(e.message || e));
   });
@@ -3808,12 +4322,14 @@ function shutdown() {
   for (const port of ports.values()) {
     if (port.fd === null) continue;
     try {
+      // Ctrl-C, leave the raw REPL, soft reset: the board's own program starts again.
       fs.writeSync(port.fd, Buffer.from('\r' + CTRL_C + CTRL_B + CTRL_D, 'binary'));
       port._close();
     } catch { /* Board disconnected or unresponsive during shutdown. */ }
   }
   process.exit(0);
 }
+// Run as a program: one MCP transport at most, then stdio MCP or the web server.
 if (require.main === module) {
   if (conflictingMcpFlags) {
     console.error('Do not combine --no-mcp with --mcp-stdio or --mcp-http');
@@ -3826,11 +4342,16 @@ if (require.main === module) {
   } else {
     startServer({ mcpHttp });
   }
+  // Ctrl-C or a service stop resets the boards before exiting.
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
 
+// Exported for the test suite.
 module.exports = {
+  hostAllowed,
+  ctrlpiInstallFiles,
+  ctrlpiMainError,
   validateUf2Image,
   espSlipEncode,
   espSlipDecode,
@@ -3882,6 +4403,7 @@ module.exports = {
   requireWritable,
   scanDevices,
   espResetStrategies,
+  enterBootloader,
   rebootEspAfterInstall,
   selectMcpTransports,
   shouldOpenBrowser,

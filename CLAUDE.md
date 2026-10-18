@@ -8,7 +8,11 @@ This file provides guidance to Claude Code when working in this repository.
 
 The app uses only Node.js built-in modules for its JavaScript runtime and has no frontend build step. On Windows, it compiles [combridge.cs](combridge.cs) into a native serial helper at startup using the installed .NET Framework C# compiler (`csc.exe`). The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
 
-The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `combridge.cs`, `page.html`, `README.md`, `test.js`, and `LICENSE`. Update the version in `package.json` before publishing.
+The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `combridge.cs`, `page.html`, `README.md`, `test`, and `LICENSE`.
+
+## Location
+
+This repository lives at `pico-bay/` inside the ctrlpi workspace folder, next to the other ctrlpi projects. It is its own git repository (the workspace root gitignores it), and the workspace root `CLAUDE.md` rules apply here too. Releases reach the Production copy through the root `copy_to_prod.py` (checked with `chk_prod.py`), and the b4 test Pi runs `npm test` on it from cron through `pi4-scripts/pico_tests.sh`. Publishing is described in the root `CLAUDE.md` only.
 
 ## Running
 
@@ -16,7 +20,7 @@ The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and 
 npm start
 npm run dev
 npm test
-node pico-bay.js [--port 7426] [--host 127.0.0.1] [--hold 900] [--no-open] [--no-mcp]
+node pico-bay.js [--port 7426] [--host 127.0.0.1] [--allow-host NAME] [--hold 900] [--no-open] [--no-mcp]
 node pico-bay.js --mcp-stdio
 node pico-bay.js --mcp-http
 node pico-bay.js --help
@@ -27,6 +31,7 @@ Configuration precedence is command line, environment, then default:
 
 - Port: `--port`, `PICO_PORT`, `7426`.
 - Host: `--host`, `PICO_HOST`, then `127.0.0.1`; Raspberry Pi hosts default to `0.0.0.0`.
+- Allowed host names: `--allow-host` (repeatable or comma-separated) plus `PICO_ALLOW_HOSTS`. `hostAllowed()` checks the `Host` header on every route, `/mcp` included, against DNS rebinding: IP addresses, `localhost`, `os.hostname()` (with or without `.local`), the `--host` value and these names pass, anything else gets `403`.
 - Serial hold: `--hold`, `PICO_HOLD_MS`, `900` milliseconds.
 - Browser launch: `--no-open` or `PICO_NO_OPEN`; Raspberry Pi hosts never open a browser.
 - MCP: `--mcp-stdio`/`PICO_MCP_STDIO` or `--mcp-http`/`PICO_MCP_HTTP`. Raspberry Pi hosts enable HTTP MCP by default; `--no-mcp`/`PICO_NO_MCP` disables all MCP transports.
@@ -37,10 +42,10 @@ Boolean environment values accept `true`, `false`, `1`, or `0`.
 
 The process has four main parts:
 
-1. **Serial layer** — one `PicoPort` per device path, with all operations serialized through its command chain.
-2. **Firmware adapters** — MicroPython and CircuitPython detection, capabilities, console behavior, and filesystem commands.
-3. **Storage layer** — mounted `CIRCUITPY` access, hardware-UID volume matching, Linux `udisksctl` mounting, and RP2040/RP2350 BOOTSEL handling.
-4. **Servers** — the web UI and JSON API, plus optional MCP stdio or Streamable HTTP transport.
+1. **Serial layer**: one `PicoPort` per device path, with all operations serialized through its command chain.
+2. **Firmware adapters**: MicroPython and CircuitPython detection, capabilities, console behavior, and filesystem commands.
+3. **Storage layer**: mounted `CIRCUITPY` access, hardware-UID volume matching, Linux `udisksctl` mounting, and RP2040/RP2350 BOOTSEL handling.
+4. **Servers**: the web UI and JSON API, plus optional MCP stdio or Streamable HTTP transport.
 
 Important HTTP routes include:
 
@@ -106,7 +111,7 @@ Run the complete dependency-free suite with:
 npm test
 ```
 
-`test.js` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP, BOOTSEL installation, and ESP32 ROM installation. It also acts as the test reporter to normalize duration output for local and CI runs.
+The test suite in `test/` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP, BOOTSEL installation, and ESP32 ROM installation.
 
 After the non-hardware tests pass, the suite scans for connected boards. With no board, the physical section is skipped. MicroPython and writable CircuitPython boards receive temporary file/folder write-read-delete checks. Read-only CircuitPython boards receive non-destructive capability and console checks. Each firmware uses its own protocol path, and all temporary files must be removed in `finally` cleanup.
 

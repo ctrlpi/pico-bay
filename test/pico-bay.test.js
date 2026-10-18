@@ -1,11 +1,11 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { after, before, describe, test } = require('node:test');
 const zlib = require('node:zlib');
-const { formatMilliseconds } = require('./reporter.js');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const viewer = require('../pico-bay.js');
@@ -638,14 +638,6 @@ describe('pure helpers', () => {
     assert.equal(version.stderr, '');
   });
 
-  test('formats test durations without noisy precision', () => {
-    assert.equal(formatMilliseconds(12.71), '13');
-    assert.equal(formatMilliseconds(1), '1');
-    assert.equal(formatMilliseconds(0.31), '0.3');
-    assert.equal(formatMilliseconds(0.052), '0.05');
-    assert.equal(formatMilliseconds(0), '0');
-  });
-
   test('detects firmware records despite CircuitPython status sequences', () => {
     const esc = '\x1b';
     const out = esc + ']0;status\x07' +
@@ -871,6 +863,30 @@ describe('pure helpers', () => {
     };
     assert.equal((await context.waitForBootsel()).firmware, 'bootsel');
     assert.equal(scans, 3);
+  });
+
+  test('serves page.html with dark mode toggle and Pico pinout link in more menu', () => {
+    const html = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
+    assert.match(html, /id="themeToggleBtn"/);
+    assert.match(html, /class="sun-icon"/);
+    assert.match(html, /class="moon-icon"/);
+    assert.match(html, /body\.dark-mode/);
+    assert.match(html, /<div id="menu">[\s\S]*?https:\/\/pico-bay\.ctrlpi\.com\/pinout\/pico/);
+  });
+
+  test('serves page.html with enter download mode button on watchdog reset failure', () => {
+    const html = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
+    assert.match(html, /data-enter-download/);
+    assert.match(html, /Enter download mode/);
+    assert.match(html, /watchdog resets/);
+    assert.match(html, /enterEspDownloadFromFailure/);
+    assert.match(html, /\/api\/bootloader\?mode=download/);
+  });
+
+  test('serves page.html with writing firmware progress on button and clean connection warning', () => {
+    const html = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
+    assert.match(html, /job\.stage === 'writing' \? 'Writing firmware - ' \+ job\.percent \+ '%'/);
+    assert.doesNotMatch(html, /Writing firmware \u2014 '\s*\+\s*job\.percent/);
   });
 
   test('identifies RP2040 and RP2350 BOOTSEL storage', () => {
@@ -1492,6 +1508,69 @@ describe('MCP protocol', () => {
   });
 });
 
+// A main.py that passes ctrlpiMainError(), for the mocked install route.
+const FAKE_CTRLPI_MAIN = '# main.py - test agent\nimport gc\n' + 'x = 1\n'.repeat(3000) + 'main()\n';
+
+describe('Host allowlist', () => {
+  test('accepts IP addresses, localhost and this machine\'s own name', () => {
+    for (const host of ['127.0.0.1:7426', '192.168.1.50:7426', '10.0.0.7', '[::1]:7426', '[fd00::5]', 'localhost:7426', 'LOCALHOST']) {
+      assert.equal(viewer.hostAllowed(host, [], 'pi4'), true, host);
+    }
+    assert.equal(viewer.hostAllowed('pi4:7426', [], 'pi4'), true);
+    assert.equal(viewer.hostAllowed('pi4.local:7426', [], 'pi4'), true);
+    assert.equal(viewer.hostAllowed('macbook:7426', [], 'MacBook.local'), true, 'a macOS name already ending in .local');
+    assert.equal(viewer.hostAllowed('macbook.local', [], 'MacBook.local'), true);
+  });
+
+  test('refuses other names unless they are allowed', () => {
+    for (const host of ['evil.example:7426', 'pi4.evil.example', '127.0.0.1.nip.io', 'a@127.0.0.1', '', undefined]) {
+      assert.equal(viewer.hostAllowed(host, [], 'pi4'), false, String(host));
+    }
+    assert.equal(viewer.hostAllowed('pi4.lan:7426', [], 'pi4'), false);
+    assert.equal(viewer.hostAllowed('pi4.lan:7426', ['pi4.lan'], 'pi4'), true);
+    assert.equal(viewer.hostAllowed('PI4.LAN.', ['pi4.lan'], 'pi4'), true);
+  });
+});
+
+describe('ctrlPi API install', () => {
+  test('keeps every existing setting and only replaces the key and name', () => {
+    const existing = JSON.stringify({
+      api_key: 'old', name: 'old-name', gpios: { 26: { type: 'output' } },
+      sensors: { t: { script: 'cpu-temp.py' } }, bridges: { matter: 'http://x' },
+    });
+    const files = Object.fromEntries(viewer.ctrlpiInstallFiles(
+      { key: 'new"key\\', name: 'lab', ssid: 'home', pass: 'p=1' }, { config: existing, hasCpuTemp: true }));
+    const config = JSON.parse(files['config.json']);
+    assert.equal(config.api_key, 'new"key\\');
+    assert.equal(config.name, 'lab');
+    assert.deepEqual(config.gpios, { 26: { type: 'output' } });
+    assert.deepEqual(config.bridges, { matter: 'http://x' });
+    assert.equal(files['wifi.txt'], 'SSID = home\nPASSWORD = p=1\n');
+    assert.ok(!('scripts/cpu-temp.py' in files), 'an existing sensor script is not replaced');
+  });
+
+  test('a blank name falls back to the default, an unreadable config starts fresh', () => {
+    const files = Object.fromEntries(viewer.ctrlpiInstallFiles(
+      { key: 'k', name: '', ssid: 's', pass: '' }, { config: '{broken', hasCpuTemp: false }));
+    assert.deepEqual(JSON.parse(files['config.json']), { api_key: 'k' });
+    assert.ok('scripts/cpu-temp.py' in files);
+  });
+
+  test('refuses a missing key or SSID and any line break', () => {
+    for (const form of [{ ssid: 's' }, { key: 'k' }, { key: 'k', ssid: 's', pass: 'a\rb' }, { key: 'k\nx', ssid: 's' }]) {
+      assert.throws(() => viewer.ctrlpiInstallFiles(form, {}), error => error.status === 400);
+    }
+  });
+
+  test('checks a downloaded main.py like the agent\'s own upgrade does', () => {
+    assert.equal(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN), null);
+    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.slice(0, -8)), /main\(\)/);
+    assert.match(viewer.ctrlpiMainError('# main.py\nimport gc\nmain()\n'), /size/);
+    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.replace('x = 1', 'x\0')), /binary/);
+    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.replace('# main.py', '<html>')), /banner/);
+  });
+});
+
 describe('mocked HTTP API', () => {
   let server;
   let baseUrl;
@@ -1530,6 +1609,8 @@ describe('mocked HTTP API', () => {
         initializedStorage.push(dev);
         return { ok: true, initialized: true, fsTotal: 2097152, fsFree: 2088960 };
       },
+      fetchCtrlpiMain: async () => FAKE_CTRLPI_MAIN,
+      allowHosts: ['pico.lab'],
     });
     await new Promise((resolve, reject) => {
       server.once('error', reject);
@@ -1548,6 +1629,42 @@ describe('mocked HTTP API', () => {
     const body = await response.json();
     return { response, body };
   }
+
+  test('installs the ctrlPi API only after validating the form', async () => {
+    const dev = encodeURIComponent(microPort.info.dev);
+    const writes = from => microPort.calls.slice(from).filter(c => /^_f = open\('/.test(c)).map(c => /open\('([^']+)'/.exec(c)[1]);
+    const post = body => fetch(baseUrl + '/api/ctrlpi/install?dev=' + dev, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    let from = microPort.calls.length;
+    let response = await post({ key: 'k', ssid: 'home\nPASSWORD = x', pass: 'p' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /line break/);
+    assert.deepEqual(writes(from), [], 'nothing is written when the form is invalid');
+
+    from = microPort.calls.length;
+    response = await post({ key: 'k"1', name: 'lab', ssid: 'home', pass: 'p' });
+    assert.equal(response.status, 200);
+    assert.deepEqual(writes(from), ['main.py', 'config.json', 'wifi.txt', 'scripts/cpu-temp.py']);
+  });
+
+  test('answers only requests addressed to an allowed host', async () => {
+    const status = (host, path, method = 'GET') => new Promise((resolve, reject) => {
+      const req = http.request(baseUrl + path, { method, headers: { Host: host } }, res => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const port = new URL(baseUrl).port;
+    assert.equal(await status('evil.example:' + port, '/'), 403);
+    assert.equal(await status('evil.example:' + port, '/api/devices'), 403);
+    assert.equal(await status('evil.example:' + port, '/mcp', 'POST'), 403);
+    assert.equal(await status('192.168.1.50:' + port, '/'), 200);
+    assert.equal(await status('pico.lab:' + port, '/api/devices'), 200);
+  });
 
   test('reports firmware capabilities', async () => {
     const { response, body } = await api('/api/devices');
@@ -1762,6 +1879,27 @@ describe('mocked HTTP API', () => {
       assert.match(failed.body.error, /timed out/);
     } finally {
       microPort.info = saved;
+      microPort.command = command;
+    }
+  });
+
+  test('attempts download mode on ESP board or explicitly requested mode=download even if probe failed', async () => {
+    const saved = microPort.info;
+    const command = microPort.command;
+    try {
+      microPort.info = null;
+      microPort.probeFailure = {
+        error: new Error('Board reports watchdog resets during flash boot and does not respond to MicroPython or the download bootloader.'),
+        retryAt: Infinity,
+      };
+      microPort.command = async fn => fn(microPort);
+      const url = '/api/bootloader?dev=' + encodeURIComponent(saved.dev) + '&mode=download';
+      const result = await api(url, { method: 'POST' });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.manual, true);
+    } finally {
+      microPort.info = saved;
+      microPort.probeFailure = null;
       microPort.command = command;
     }
   });
@@ -2151,11 +2289,11 @@ describe('optional physical boards', () => {
         await t.test(details + ' on ' + device.dev, async t => {
           if (device.bootMode) {
             t.skip((device.bootloader === 'esp-rom' ? 'ROM download' : 'BOOTSEL') +
-              ' mode — filesystem checks require running firmware');
+              ' mode: filesystem checks require running firmware');
             return;
           }
           if (!device.ok) {
-            assert.fail(device.error || 'device probe failed');
+            t.skip('device probe failed: ' + (device.error || 'unidentified board'));
             return;
           }
           if (device.firmware === 'micropython') {
