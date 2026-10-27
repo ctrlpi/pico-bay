@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code when working in this repository.
 
+## The README is locked
+
+`README.md` is done. Do not edit it without the user's explicit confirmation, even for a small wording or formatting fix, and even to keep it in sync with another project's README.
+
 ## What this is
 
 `pico-bay` is an app and MCP server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB. It supports multiple boards, live console access, file operations, ZIP backup and restore, and MicroPython installation for RP2040 and RP2350 boards in BOOTSEL mode and supported ESP32 boards in ROM download mode.
@@ -57,6 +61,7 @@ Important HTTP routes include:
 - `/api/esp/install` and `/api/esp/install/status` for confirmed background MicroPython installation and progress through the ESP ROM loader.
 - `/api/storage/initialize` for explicitly confirmed recovery of an uninitialized ESP32 MicroPython VFS partition.
 - `/api/readme` for the full-screen README view.
+- `/api/ctrlpi/install` for "Install ctrlPi API": `ctrlpiBoardKind()` picks the agent from the board (`pico-gpio-api` on a Pico W / Pico 2 W, `esp32-gpio-api` on an ESP32, ESP32-S3 or ESP32-C3 running MicroPython; anything else is a `400`). `downloadCtrlpiAgent()` fetches its files from the project's GitHub `main` branch (`CTRLPI_AGENTS`: `app.mpy`, `upgrader.mpy` and `main.py`, plus `boot.py` on the ESP32; `upgrader.mpy` runs the agent's own `/upgrade`, and a board without it answers that with `500`), `ctrlpiFileError()` checks each the way the agent's upgrader does (`.mpy` header and size for both `.mpy` files), a leftover `upgrade.lock` is deleted first (it would boot the upgrader over the new files), and they are written with `main.py` last, then `config.json` (the board's own kept, with the new key and name), `wifi.txt`, and a `scripts/cpu-temp.py` for that board when it has none. `page.html` offers the menu item on the same boards.
 - `/mcp` when Streamable HTTP MCP is enabled.
 
 ## Serial and device constraints

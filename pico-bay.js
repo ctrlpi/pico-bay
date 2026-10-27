@@ -3647,10 +3647,16 @@ async function handleMcpHttp(req, res) {
 }
 
 // ── ctrlPi API install ──────────────────────────────────────────────────────────
-// "Install ctrlPi API" puts pico-gpio-api on a Pico W / Pico 2 W: main.py from the
-// project's GitHub release branch, plus config.json, wifi.txt and a sample sensor.
+// "Install ctrlPi API" puts the agent on a board from the project's GitHub release
+// branch: pico-gpio-api on a Pico W / Pico 2 W, esp32-gpio-api on an ESP32, ESP32-S3 or
+// ESP32-C3. app.mpy is the precompiled agent, upgrader.mpy runs the agent's own /upgrade,
+// and main.py imports one of them (written last); the ESP32 also gets boot.py. Plus
+// config.json, wifi.txt and a sample sensor.
 
-const CTRLPI_MAIN_URL = 'https://raw.githubusercontent.com/ctrlpi/pico-gpio-api/main/main.py';
+const CTRLPI_AGENTS = {
+  pico: { base: 'https://raw.githubusercontent.com/ctrlpi/pico-gpio-api/main/', files: ['app.mpy', 'upgrader.mpy', 'main.py'] },
+  esp32: { base: 'https://raw.githubusercontent.com/ctrlpi/esp32-gpio-api/main/', files: ['app.mpy', 'boot.py', 'upgrader.mpy', 'main.py'] },
+};
 const CTRLPI_CPU_TEMP = `# CPU temperature in degrees Celsius, as a bare number (e.g. 23.4), not JSON.
 # Use it as a sensor: POST /sensor/config/cpu_temp {"script": "cpu-temp.py"}
 import machine
@@ -3659,6 +3665,25 @@ def read():
     v = machine.ADC(4).read_u16() * 3.3 / 65535
     return round(27 - (v - 0.706) / 0.001721, 1)
 `;
+const CTRLPI_ESP32_CPU_TEMP = `# ESP32 internal chip temperature in degrees Celsius.
+# This measures the MCU die, which normally runs warmer than ambient air.
+import esp32
+
+def read():
+    if hasattr(esp32, "mcu_temperature"):
+        return round(esp32.mcu_temperature(), 1)
+    fahrenheit = esp32.raw_temperature()
+    return round((fahrenheit - 32) * 5 / 9, 1)
+`;
+
+// Which agent a board takes: 'pico' (Pico W, Pico 2 W), 'esp32' (an ESP32, ESP32-S3 or
+// ESP32-C3 running MicroPython; the S2 has no agent), or null.
+function ctrlpiBoardKind(info) {
+  const machine = String(info?.machine || '').toLowerCase();
+  if (/\bpico (?:2 )?w\b/.test(machine)) return 'pico';
+  if (info?.firmware === 'micropython' && /esp32/.test(machine) && !/esp32-?s2/.test(machine)) return 'esp32';
+  return null;
+}
 
 // An Error that the HTTP handler answers with `status` instead of 500.
 function httpError(status, message) {
@@ -3667,10 +3692,10 @@ function httpError(status, message) {
   return error;
 }
 
-// The files the install writes besides main.py, as [path, text] pairs. An existing
+// The files the install writes besides the agent's own, as [path, text] pairs. An existing
 // config.json keeps every setting (pins, sensors, bridges) and only takes the new key
 // and name; scripts/cpu-temp.py is written only when the board has none.
-function ctrlpiInstallFiles(form, existing = {}) {
+function ctrlpiInstallFiles(form, existing = {}, kind = 'pico') {
   // The form's fields; key and SSID are required, and none may contain a line break.
   const key = String(form?.key ?? '').trim();
   const name = String(form?.name ?? '').trim();
@@ -3691,33 +3716,45 @@ function ctrlpiInstallFiles(form, existing = {}) {
   }
   config.api_key = key;
   if (name) config.name = name;
-  else delete config.name;  // a blank name means the agent's own pico-<serial4> default
+  else delete config.name;  // a blank name means the agent's own pico-<serial4> / esp32-<serial4> default
   const files = [
     ['config.json', JSON.stringify(config, null, 2) + '\n'],
     ['wifi.txt', 'SSID = ' + ssid + '\nPASSWORD = ' + pass + '\n'],
   ];
-  if (!existing.hasCpuTemp) files.push(['scripts/cpu-temp.py', CTRLPI_CPU_TEMP]);
+  if (!existing.hasCpuTemp) files.push(['scripts/cpu-temp.py', kind === 'esp32' ? CTRLPI_ESP32_CPU_TEMP : CTRLPI_CPU_TEMP]);
   return files;
 }
 
-// The checks the agent's own /upgrade makes on a downloaded main.py; null when it passes.
-function ctrlpiMainError(text) {
-  if (text.length < 10 * 1024 || text.length > 512 * 1024) return 'unexpected size (' + text.length + ' bytes)';
-  const head = text.slice(0, 256);
-  if (!head.includes('main.py') || !head.includes('import')) return 'banner or imports missing';
-  if (text.includes('\0')) return 'binary data in file';
-  if (!/\nmain\(\)\s*$/.test(text)) return 'trailing main() call missing';
+// The checks the agent's own /upgrade makes on a downloaded file (a Buffer): an .mpy
+// header for app.mpy and upgrader.mpy, Python text for main.py and boot.py. null when it
+// passes.
+function ctrlpiFileError(name, buf) {
+  if (name === 'app.mpy' || name === 'upgrader.mpy') {
+    const minimum = name === 'app.mpy' ? 2000 : 1000;
+    if (buf.length < minimum || buf.length > 512 * 1024) return 'unexpected size (' + buf.length + ' bytes)';
+    if (buf[0] !== 0x4d) return 'not an .mpy file';
+    return null;
+  }
+  if (buf.length < 20 || buf.length > 16 * 1024) return 'unexpected size (' + buf.length + ' bytes)';
+  if (buf.includes(0)) return 'binary data in file';
+  if (!buf.toString('utf8').includes('import')) return 'import missing';
   return null;
 }
 
-// Downloads pico-gpio-api's main.py, with a 30 s limit, and checks it.
-async function downloadCtrlpiMain() {
-  const response = await fetch(CTRLPI_MAIN_URL, { signal: AbortSignal.timeout(30000) });
-  if (!response.ok) throw httpError(502, 'main.py download failed (HTTP ' + response.status + ')');
-  const text = await response.text();
-  const problem = ctrlpiMainError(text);
-  if (problem) throw httpError(502, 'Downloaded main.py failed its check: ' + problem);
-  return text;
+// Downloads the agent's files for a board kind, 30 s each, and checks them. Returns
+// [name, Buffer] pairs in the order they are written: main.py last.
+async function downloadCtrlpiAgent(kind) {
+  const agent = CTRLPI_AGENTS[kind];
+  const files = [];
+  for (const name of agent.files) {
+    const response = await fetch(agent.base + name, { signal: AbortSignal.timeout(30000) });
+    if (!response.ok) throw httpError(502, name + ' download failed (HTTP ' + response.status + ')');
+    const buf = Buffer.from(await response.arrayBuffer());
+    const problem = ctrlpiFileError(name, buf);
+    if (problem) throw httpError(502, 'Downloaded ' + name + ' failed its check: ' + problem);
+    files.push([name, buf]);
+  }
+  return files;
 }
 
 // ── Routing ─────────────────────────────────────────────────────────────────
@@ -3733,13 +3770,13 @@ function createServer(options = {}) {
       String(error.message || error);
     (options.errorLogger || console.error)(line.replace(/[\r\n]+/g, ' '));
   };
-  // The UI can switch HTTP MCP on and off while running. The installers and the main.py
+  // The UI can switch HTTP MCP on and off while running. The installers and the agent
   // download can be replaced through options, which is how the tests run without boards.
   let enableMcp = options.mcpHttp === true;
   const installBootsel = options.installBootsel || installBootselFirmware;
   const installEsp = options.installEsp || installEspFirmware;
   const initializeStorage = options.initializeStorage || initializeEspStorage;
-  const fetchCtrlpiMain = options.fetchCtrlpiMain || downloadCtrlpiMain;
+  const fetchCtrlpiAgent = options.fetchCtrlpiAgent || downloadCtrlpiAgent;
   const allowHosts = options.allowHosts || ALLOW_HOSTS;
   // Background install jobs by id, and the running job per device (one at a time).
   const bootselJobs = new Map();
@@ -4163,6 +4200,8 @@ function createServer(options = {}) {
     // "Install ctrlPi API" (see ctrlpiInstallFiles).
     if (p === '/api/ctrlpi/install' && req.method === 'POST') {
       await requireWritable(dev);
+      const kind = ctrlpiBoardKind(await probe(dev));
+      if (!kind) throw httpError(400, 'Install ctrlPi API needs a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython');
       let body;
       try { body = JSON.parse(await readBody(req)); } catch { throw httpError(400, 'Invalid JSON body'); }
       // What the board already has: its config is kept, its sensor script is not replaced.
@@ -4171,13 +4210,15 @@ function createServer(options = {}) {
         config: existingPaths.has('config.json') ? (await readFile(dev, 'config.json')).toString('utf8') : null,
         hasCpuTemp: existingPaths.has('scripts/cpu-temp.py'),
       };
-      // Validate the form and fetch main.py before anything on the board is written.
-      const files = ctrlpiInstallFiles(body, existing);
-      const mainPy = await fetchCtrlpiMain();
-      await writeFile(dev, 'main.py', Buffer.from(mainPy));
+      // Validate the form and fetch the agent before anything on the board is written.
+      const files = ctrlpiInstallFiles(body, existing, kind);
+      const agentFiles = await fetchCtrlpiAgent(kind);
+      // A leftover upgrade.lock would boot the upgrader and replace what is installed here.
+      if (existingPaths.has('upgrade.lock')) await removePath(dev, 'upgrade.lock');
+      for (const [file, buf] of agentFiles) await writeFile(dev, file, buf);
       for (const [file, text] of files) await writeFile(dev, file, Buffer.from(text));
       await resetBoard(dev, false);
-      sendJSON(res, 200, { ok: true, keptConfig: existing.config !== null });
+      sendJSON(res, 200, { ok: true, kind, keptConfig: existing.config !== null });
       return;
     }
 
@@ -4351,7 +4392,8 @@ if (require.main === module) {
 module.exports = {
   hostAllowed,
   ctrlpiInstallFiles,
-  ctrlpiMainError,
+  ctrlpiFileError,
+  ctrlpiBoardKind,
   validateUf2Image,
   espSlipEncode,
   espSlipDecode,

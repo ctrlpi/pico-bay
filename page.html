@@ -1053,7 +1053,7 @@
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM1.5 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm13 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/></svg>
     </button>
     <div id="menu">
-      <!-- Upload, and Install ctrlPi API (shown on a Pico W / Pico 2 W only). -->
+      <!-- Upload, and Install ctrlPi API (shown on a Pico W / Pico 2 W, ESP32, ESP32-S3 or ESP32-C3). -->
       <button class="requires-write" onclick="pickUpload()">Upload files…</button>
       <button class="requires-write" onclick="pickUploadFolder()">Upload folder…</button>
       <button class="requires-write" id="ctrlpi-install-btn" style="color: #0969da; display: none;" onclick="openCtrlPiDialog()">Install ctrlPi API</button>
@@ -1876,11 +1876,15 @@
     conIn.disabled = !on || !canUseConsole();
     conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
 
-    // "Install ctrlPi API" is offered on a Pico W or Pico 2 W only.
+    // "Install ctrlPi API" is offered on a Pico W / Pico 2 W, and on an ESP32, ESP32-S3 or
+    // ESP32-C3 running MicroPython (the same boards the server accepts).
     var ctrlPiBtn = document.getElementById('ctrlpi-install-btn');
     if (ctrlPiBtn) {
-      var isPicoW = device && device.machine && (device.machine.toLowerCase().includes('pico w') || device.machine.toLowerCase().includes('pico 2 w'));
-      ctrlPiBtn.style.display = (on && isPicoW) ? 'block' : 'none';
+      var machine = device && device.machine ? device.machine.toLowerCase() : '';
+      var ctrlPiKind = /\bpico (?:2 )?w\b/.test(machine) ? 'pico'
+        : device && device.firmware === 'micropython' && /esp32/.test(machine) && !/esp32-?s2/.test(machine) ? 'esp32' : '';
+      ctrlPiBtn.dataset.kind = ctrlPiKind;
+      ctrlPiBtn.style.display = (on && ctrlPiKind) ? 'block' : 'none';
     }
   }
 
@@ -3633,6 +3637,8 @@
     var passInput = document.getElementById('ctrlpi-pass');
     
     // Defaults, replaced by the board's own config.json and wifi.txt when present.
+    var kind = document.getElementById('ctrlpi-install-btn').dataset.kind || 'pico';
+    nameInput.placeholder = 'Defaults to ' + kind + '-<serial4>';
     keyInput.value = 'your-secret-key';
     nameInput.value = '';
     ssidInput.value = '';

@@ -1508,8 +1508,10 @@ describe('MCP protocol', () => {
   });
 });
 
-// A main.py that passes ctrlpiMainError(), for the mocked install route.
-const FAKE_CTRLPI_MAIN = '# main.py - test agent\nimport gc\n' + 'x = 1\n'.repeat(3000) + 'main()\n';
+// An app.mpy, upgrader.mpy and main.py that pass ctrlpiFileError(), for the mocked install route.
+const FAKE_APP_MPY = Buffer.concat([Buffer.from([0x4d, 6, 0, 31]), Buffer.alloc(3000, 1)]);
+const FAKE_UPGRADER_MPY = Buffer.concat([Buffer.from([0x4d, 6, 0, 31]), Buffer.alloc(1500, 1)]);
+const FAKE_MAIN_PY = Buffer.from('# Load the compiled application.\n\nimport app\n');
 
 describe('Host allowlist', () => {
   test('accepts IP addresses, localhost and this machine\'s own name', () => {
@@ -1562,12 +1564,37 @@ describe('ctrlPi API install', () => {
     }
   });
 
-  test('checks a downloaded main.py like the agent\'s own upgrade does', () => {
-    assert.equal(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN), null);
-    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.slice(0, -8)), /main\(\)/);
-    assert.match(viewer.ctrlpiMainError('# main.py\nimport gc\nmain()\n'), /size/);
-    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.replace('x = 1', 'x\0')), /binary/);
-    assert.match(viewer.ctrlpiMainError(FAKE_CTRLPI_MAIN.replace('# main.py', '<html>')), /banner/);
+  test('picks the agent for the board: pico-gpio-api or esp32-gpio-api', () => {
+    const kind = (machine, firmware = 'micropython') => viewer.ctrlpiBoardKind({ machine, firmware });
+    assert.equal(kind('Raspberry Pi Pico W with RP2040'), 'pico');
+    assert.equal(kind('Raspberry Pi Pico 2 W with RP2350'), 'pico');
+    assert.equal(kind('Generic ESP32 module with ESP32'), 'esp32');
+    assert.equal(kind('ESP32S3 module with ESP32S3'), 'esp32');
+    assert.equal(kind('ESP32C3 module with ESP32C3'), 'esp32');
+    assert.equal(kind('ESP32-S2 module with ESP32-S2'), null);
+    assert.equal(kind('Generic ESP32 module with ESP32', 'circuitpython'), null);
+    assert.equal(kind('Raspberry Pi Pico with RP2040'), null, 'no Wi-Fi, no agent');
+  });
+
+  test('an ESP32 install gets the ESP32 sample sensor', () => {
+    const form = { key: 'k', ssid: 'home', pass: 'p' };
+    const esp = Object.fromEntries(viewer.ctrlpiInstallFiles(form, {}, 'esp32'));
+    const pico = Object.fromEntries(viewer.ctrlpiInstallFiles(form, {}, 'pico'));
+    assert.match(esp['scripts/cpu-temp.py'], /import esp32/);
+    assert.match(pico['scripts/cpu-temp.py'], /ADC\(4\)/);
+  });
+
+  test('checks downloaded app.mpy, upgrader.mpy and main.py like the agent\'s own upgrade does', () => {
+    assert.equal(viewer.ctrlpiFileError('app.mpy', FAKE_APP_MPY), null);
+    assert.equal(viewer.ctrlpiFileError('upgrader.mpy', FAKE_UPGRADER_MPY), null);
+    assert.match(viewer.ctrlpiFileError('upgrader.mpy', FAKE_UPGRADER_MPY.subarray(0, 500)), /size/);
+    assert.match(viewer.ctrlpiFileError('upgrader.mpy', Buffer.concat([Buffer.from('<html>'), FAKE_UPGRADER_MPY])), /mpy/);
+    assert.equal(viewer.ctrlpiFileError('main.py', FAKE_MAIN_PY), null);
+    assert.match(viewer.ctrlpiFileError('app.mpy', FAKE_APP_MPY.subarray(0, 100)), /size/);
+    assert.match(viewer.ctrlpiFileError('app.mpy', Buffer.concat([Buffer.from('<html>'), FAKE_APP_MPY])), /mpy/);
+    assert.match(viewer.ctrlpiFileError('main.py', Buffer.from('# x\n')), /size/);
+    assert.match(viewer.ctrlpiFileError('main.py', Buffer.from('# loader\nimport app\n\0 trailing junk\n')), /binary/);
+    assert.match(viewer.ctrlpiFileError('main.py', Buffer.from('<html>not a script at all</html>\n')), /import/);
   });
 });
 
@@ -1609,7 +1636,7 @@ describe('mocked HTTP API', () => {
         initializedStorage.push(dev);
         return { ok: true, initialized: true, fsTotal: 2097152, fsFree: 2088960 };
       },
-      fetchCtrlpiMain: async () => FAKE_CTRLPI_MAIN,
+      fetchCtrlpiAgent: async () => [['app.mpy', FAKE_APP_MPY], ['upgrader.mpy', FAKE_UPGRADER_MPY], ['main.py', FAKE_MAIN_PY]],
       allowHosts: ['pico.lab'],
     });
     await new Promise((resolve, reject) => {
@@ -1637,16 +1664,49 @@ describe('mocked HTTP API', () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
 
+    // A board no agent runs on is refused before anything is read or written.
     let from = microPort.calls.length;
-    let response = await post({ key: 'k', ssid: 'home\nPASSWORD = x', pass: 'p' });
+    let response = await post({ key: 'k', ssid: 'home', pass: 'p' });
     assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /line break/);
-    assert.deepEqual(writes(from), [], 'nothing is written when the form is invalid');
+    assert.match((await response.json()).error, /needs a Pico W/);
+    assert.deepEqual(writes(from), []);
 
-    from = microPort.calls.length;
-    response = await post({ key: 'k"1', name: 'lab', ssid: 'home', pass: 'p' });
-    assert.equal(response.status, 200);
-    assert.deepEqual(writes(from), ['main.py', 'config.json', 'wifi.txt', 'scripts/cpu-temp.py']);
+    const machine = microPort.info.machine;
+    microPort.info.machine = 'Raspberry Pi Pico W with RP2040';
+    try {
+      from = microPort.calls.length;
+      response = await post({ key: 'k', ssid: 'home\nPASSWORD = x', pass: 'p' });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /line break/);
+      assert.deepEqual(writes(from), [], 'nothing is written when the form is invalid');
+
+      from = microPort.calls.length;
+      response = await post({ key: 'k"1', name: 'lab', ssid: 'home', pass: 'p' });
+      assert.equal(response.status, 200);
+      assert.deepEqual(writes(from), ['app.mpy', 'upgrader.mpy', 'main.py', 'config.json', 'wifi.txt', 'scripts/cpu-temp.py']);
+      assert.ok(!microPort.calls.slice(from).some(c => c.includes("_rm('upgrade.lock')")), 'no lock, nothing removed');
+
+      // A leftover upgrade.lock is removed before the agent is written.
+      const exec = microPort.exec;
+      microPort.exec = async function (code) {
+        if (!code.includes("print('PVF'")) return exec.call(this, code);
+        this.calls.push(code);
+        return { out: 'PVF 0 7 0 code.py\r\nPVF 0 80 0 upgrade.lock\r\n', err: '' };
+      };
+      try {
+        from = microPort.calls.length;
+        response = await post({ key: 'k', ssid: 'home', pass: 'p' });
+        assert.equal(response.status, 200);
+        const calls = microPort.calls.slice(from);
+        const removed = calls.findIndex(c => c.includes("_rm('upgrade.lock')"));
+        assert.ok(removed >= 0, 'upgrade.lock removed');
+        assert.ok(removed < calls.findIndex(c => c.includes("open('app.mpy'")), 'before app.mpy is written');
+      } finally {
+        microPort.exec = exec;
+      }
+    } finally {
+      microPort.info.machine = machine;
+    }
   });
 
   test('answers only requests addressed to an allowed host', async () => {

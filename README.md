@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.30](https://img.shields.io/badge/version-0.9.30-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.32](https://img.shields.io/badge/version-0.9.32-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![License: MIT](https://img.shields.io/badge/license-MIT-188038.svg)](LICENSE)
@@ -110,9 +110,16 @@ Call `pico_boards_list` first, then pass its `board_id` to board-specific tools.
 
 ## Installing the ctrlPi API
 
-On a Pico W or Pico 2 W running MicroPython, **Install ctrlPi API** in the top-right menu turns the board into a [`pico-gpio-api`](https://github.com/ctrlpi/pico-gpio-api) agent. Fill in the API key, an optional agent name, and the WiFi SSID and password; pico-bay downloads the latest `main.py` from GitHub, checks it, writes it together with `config.json`, `wifi.txt` and a sample `scripts/cpu-temp.py` sensor, and resets the board.
+On a board running MicroPython, **Install ctrlPi API** in the top-right menu turns it into a ctrlPi agent:
 
-On a board that already runs the agent, the form is filled in from its current files, and its existing settings (pins, sensors, bridges) are kept: only the key and name are replaced, and an existing `cpu-temp.py` is left alone. A blank name keeps the agent's own `pico-<serial4>` default.
+| Board | Agent | Files downloaded from GitHub |
+|---|---|---|
+| Pico W, Pico 2 W | [`pico-gpio-api`](https://github.com/ctrlpi/pico-gpio-api) | `app.mpy`, `upgrader.mpy`, `main.py` |
+| ESP32, ESP32-S3, ESP32-C3 | [`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api) | `app.mpy`, `boot.py`, `upgrader.mpy`, `main.py` |
+
+`app.mpy` is the agent, precompiled, `upgrader.mpy` runs its over-the-air `/upgrade`, and `main.py` loads one of them. Fill in the API key, an optional agent name, and the WiFi SSID and password; pico-bay downloads the latest files, checks them, writes them (`main.py` last) together with `config.json`, `wifi.txt` and a sample `scripts/cpu-temp.py` sensor for that board, and resets it. The menu item is not shown on other boards (a Pico without WiFi, an ESP32-S2, or CircuitPython).
+
+On a board that already runs the agent, the form is filled in from its current files, and its existing settings (pins, sensors, bridges) are kept: only the key and name are replaced, and an existing `cpu-temp.py` is left alone. A blank name keeps the agent's own default, `pico-<serial4>` or `esp32-<serial4>`.
 
 ## Installing MicroPython in BOOTSEL mode
 
