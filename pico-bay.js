@@ -1414,6 +1414,7 @@ let unmountedCircuitVolumes = new Map();
 let bootselDeviceOverride = null;
 let bootselInstallOverride = null;
 let espInstallOverride = null;
+let ctrlpiAgentOverride = null;
 
 // Folders that may be a CIRCUITPY volume: Windows drives other than C: holding
 // boot_out.txt, /Volumes on macOS, /media, /run/media and /mnt on Linux.
@@ -2656,7 +2657,7 @@ async function runPython(dev, options = {}) {
   const result = await port.command(async (pt) => {
     let carried = '';
     return pt.exec(code, {
-      timeout: 10 * 60 * 1000,
+      timeout: options.timeoutMs || 10 * 60 * 1000,
       onChunk: (chunk) => { carried += chunk; port._emit('out', chunk); },
     }).then(r => { r.streamed = carried; return r; });
   });
@@ -3223,18 +3224,18 @@ const MCP_TOOLS = [
     // The file tree plus Flash and RAM usage.
     name: 'pico_files_list',
     title: 'List board files',
-    description: 'List the complete board filesystem and report Flash and RAM usage. Hidden system files are omitted unless include_system is true.',
+    description: 'List the complete board filesystem and report Flash and RAM usage. Hidden files (names starting with .) are omitted unless show_hidden is true.',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { board_id: boardIdProperty, include_system: { type: 'boolean', default: false } },
+      properties: { board_id: boardIdProperty, show_hidden: { type: 'boolean', default: false, description: 'Include hidden files (starting with .).' } },
       required: ['board_id'],
     },
     annotations: readOnlyAnnotations,
     handler: async (raw) => {
-      const args = validateToolArgs(raw, ['board_id', 'include_system'], ['board_id']);
+      const args = validateToolArgs(raw, ['board_id', 'show_hidden'], ['board_id']);
       const dev = await resolveBoardId(stringArg(args, 'board_id'));
       // Usage is best-effort: a board that cannot report it still lists its files.
-      const files = await listFiles(dev, booleanArg(args, 'include_system'));
+      const files = await listFiles(dev, booleanArg(args, 'show_hidden'));
       const stats = await deviceStats(dev).catch(() => null);
       return mcpToolResult({ board_id: args.board_id, files, stats });
     },
@@ -3361,15 +3362,20 @@ const MCP_TOOLS = [
     // Runs a file as __main__, or a code snippet, and returns its output.
     name: 'pico_python_run',
     title: 'Run Python on a board',
-    description: 'Run a Python file as __main__ or execute Python code. Provide exactly one of path or code. This can change any state accessible to code on the board.',
+    description: 'Run a Python file as __main__ or execute Python code. Provide exactly one of path or code. This can change any state accessible to code on the board. A program still running after timeout_ms is interrupted with Ctrl-C.',
     inputSchema: {
       type: 'object', additionalProperties: false,
-      properties: { board_id: boardIdProperty, path: boardPathProperty, code: { type: 'string' } },
+      properties: {
+        board_id: boardIdProperty, path: boardPathProperty, code: { type: 'string' },
+        timeout_ms: { type: 'integer', description: 'Execution timeout in milliseconds (default 30000, max 600000).' },
+      },
       required: ['board_id'],
     },
     annotations: destructiveAnnotations,
     handler: async (raw) => {
-      const args = validateToolArgs(raw, ['board_id', 'path', 'code'], ['board_id']);
+      const args = validateToolArgs(raw, ['board_id', 'path', 'code', 'timeout_ms'], ['board_id']);
+      if (args.timeout_ms !== undefined && !Number.isInteger(args.timeout_ms)) throw new Error('timeout_ms must be an integer');
+      const timeoutMs = Math.min(Math.max(args.timeout_ms ?? 30000, 1000), 600000);
       const dev = await resolveBoardId(stringArg(args, 'board_id'));
       const hasPath = args.path !== undefined;
       const hasCode = args.code !== undefined;
@@ -3377,7 +3383,15 @@ const MCP_TOOLS = [
       const options = hasPath
         ? { path: cleanToolPath(args, 'path') }
         : { code: stringArg(args, 'code', { allowEmpty: true }) };
-      const result = await runPython(dev, options);
+      let result;
+      try {
+        result = await runPython(dev, { ...options, timeoutMs });
+      } catch (error) {
+        if (!/timed out waiting for the board/.test(String(error.message || error))) throw error;
+        // Still running: stop it, so the board is free for the next call.
+        await interruptBoard(dev).catch(() => {});
+        throw new Error('The program was still running after ' + timeoutMs + ' ms and was interrupted with Ctrl-C. Pass a larger timeout_ms for longer runs.');
+      }
       return mcpToolResult({ board_id: args.board_id, ...result }, !result.ok);
     },
   },
@@ -3390,7 +3404,8 @@ const MCP_TOOLS = [
       type: 'object', additionalProperties: false,
       properties: { board_id: boardIdProperty }, required: ['board_id'],
     },
-    annotations: destructiveAnnotations,
+    // Stops the program; no file or setting changes.
+    annotations: additiveAnnotations,
     handler: async (raw) => {
       const args = validateToolArgs(raw, ['board_id'], ['board_id']);
       const dev = await resolveBoardId(stringArg(args, 'board_id'));
@@ -3414,6 +3429,61 @@ const MCP_TOOLS = [
       // Soft by default.
       const mode = stringArg(args, 'mode', { optional: true, values: ['soft', 'hard'] }) || 'soft';
       return mcpToolResult({ board_id: args.board_id, mode, ...await resetBoard(dev, mode === 'hard') });
+    },
+  },
+  {
+    // BOOTSEL or ESP download mode, the same as the UI's "Reboot to BOOTSEL", so pico_install
+    // can then install firmware.
+    name: 'pico_board_bootloader',
+    title: 'Put a board into firmware install mode',
+    description: 'Restart the selected board into firmware install mode: BOOTSEL on a Pico, ROM download mode on an ESP32. The running program stops and the board leaves its normal serial port, so ask the user first. When an ESP32 cannot be reset automatically the result has manual: true and a reason, and the user must hold BOOT while pressing RESET. Afterwards call pico_boards_list, then pico_install with action check.',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { board_id: boardIdProperty }, required: ['board_id'],
+    },
+    annotations: destructiveAnnotations,
+    handler: async (raw) => {
+      const args = validateToolArgs(raw, ['board_id'], ['board_id']);
+      const dev = await resolveBoardId(stringArg(args, 'board_id'));
+      return mcpToolResult({ board_id: args.board_id, ...await enterBootloader(dev) });
+    },
+  },
+  {
+    // The page's "Install ctrlPi API".
+    name: 'pico_ctrlpi_install',
+    title: 'Install the ctrlPi API on a board',
+    description: 'Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython (pico-gpio-api or esp32-gpio-api, downloaded from GitHub). Writes app.mpy, upgrader.mpy and main.py (plus boot.py on an ESP32), then config.json (the board\'s own kept, with this api_key and name), wifi.txt and scripts/cpu-temp.py when missing, and resets the board. It replaces main.py, so ask the user first and pass confirmed: true.',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: {
+        board_id: boardIdProperty,
+        api_key: { type: 'string', description: 'Agent API key. Left out: the board\'s own key, else your-secret-key (public, so change it).' },
+        wifi_ssid: { type: 'string', description: 'Wi-Fi network the agent joins.' },
+        wifi_password: { type: 'string', description: 'Wi-Fi password (empty for an open network).' },
+        name: { type: 'string', description: 'Agent name. Left out: the board\'s own name, else the agent\'s pico-<serial4> or esp32-<serial4> default; an empty string resets it to that default.' },
+        confirmed: { type: 'boolean', description: 'Must be true after the user explicitly confirms the install.' },
+      },
+      required: ['board_id', 'wifi_ssid', 'confirmed'],
+    },
+    annotations: destructiveAnnotations,
+    handler: async (raw) => {
+      const args = validateToolArgs(
+        raw, ['board_id', 'api_key', 'wifi_ssid', 'wifi_password', 'name', 'confirmed'],
+        ['board_id', 'wifi_ssid', 'confirmed'],
+      );
+      if (args.confirmed !== true) throw new Error('confirmed must be true after explicit user confirmation');
+      const dev = await resolveBoardId(stringArg(args, 'board_id'));
+      const form = {
+        key: stringArg(args, 'api_key', { optional: true, allowEmpty: true }),
+        ssid: stringArg(args, 'wifi_ssid'),
+        pass: stringArg(args, 'wifi_password', { optional: true, allowEmpty: true }) || '',
+        name: stringArg(args, 'name', { optional: true, allowEmpty: true }),
+      };
+      const result = await installCtrlpi(dev, form, ctrlpiAgentOverride || downloadCtrlpiAgent, { keepOmitted: true });
+      return mcpToolResult({
+        board_id: args.board_id, ok: true, kind: result.kind, kept_config: result.keptConfig,
+        ...(result.defaultKey ? { warning: CTRLPI_DEFAULT_KEY_WARNING } : {}),
+      });
     },
   },
 ];
@@ -3695,17 +3765,37 @@ function httpError(status, message) {
 // The files the install writes besides the agent's own, as [path, text] pairs. An existing
 // config.json keeps every setting (pins, sensors, bridges) and only takes the new key
 // and name; scripts/cpu-temp.py is written only when the board has none.
-function ctrlpiInstallFiles(form, existing = {}, kind = 'pico') {
-  // The form's fields; key and SSID are required, and none may contain a line break.
-  const key = String(form?.key ?? '').trim();
-  const name = String(form?.name ?? '').trim();
-  const ssid = String(form?.ssid ?? '');
-  const pass = String(form?.pass ?? '');
-  if (!key) throw httpError(400, 'API key is required');
-  if (!ssid) throw httpError(400, 'WiFi SSID is required');
-  for (const [label, value] of [['API key', key], ['Agent name', name], ['WiFi SSID', ssid], ['WiFi password', pass]]) {
-    if (/[\r\n]/.test(value)) throw httpError(400, label + ' cannot contain a line break');
-  }
+// The agents' shipped API key: anyone who knows it can drive the GPIO pins, and agents refuse
+// /script/write while it is set.
+const CTRLPI_DEFAULT_KEY = 'your-secret-key';
+const CTRLPI_DEFAULT_KEY_WARNING = 'The agent uses the default API key your-secret-key, which is public: anyone on the network can control it, and /script/write is refused until the key is changed.';
+
+// "Install ctrlPi API" for the page and pico_ctrlpi_install: the agent files (fetchAgent, from
+// GitHub), then config.json (the board's own kept), wifi.txt and a sensor script when missing,
+// then a reset.
+async function installCtrlpi(dev, form, fetchAgent, options = {}) {
+  await requireWritable(dev);
+  const kind = ctrlpiBoardKind(await probe(dev));
+  if (!kind) throw httpError(400, 'Install ctrlPi API needs a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython');
+  // What the board already has: its config is kept, its sensor script is not replaced.
+  const existingPaths = new Set((await listFiles(dev, true)).map(f => String(f.path).replace(/^\//, '')));
+  const existing = {
+    config: existingPaths.has('config.json') ? (await readFile(dev, 'config.json')).toString('utf8') : null,
+    hasCpuTemp: existingPaths.has('scripts/cpu-temp.py'),
+  };
+  // Validate the form and fetch the agent before anything on the board is written.
+  const files = ctrlpiInstallFiles(form, existing, kind, options);
+  const agentFiles = await fetchAgent(kind);
+  // A leftover upgrade.lock would boot the upgrader and replace what is installed here.
+  if (existingPaths.has('upgrade.lock')) await removePath(dev, 'upgrade.lock');
+  for (const [file, buf] of agentFiles) await writeFile(dev, file, buf);
+  for (const [file, text] of files) await writeFile(dev, file, Buffer.from(text));
+  await resetBoard(dev, false);
+  const defaultKey = JSON.parse(files[0][1]).api_key === CTRLPI_DEFAULT_KEY;
+  return { ok: true, kind, keptConfig: existing.config !== null, defaultKey };
+}
+
+function ctrlpiInstallFiles(form, existing = {}, kind = 'pico', options = {}) {
   // Start from the board's own config when it parses as a JSON object.
   let config = {};
   if (existing.config != null) {
@@ -3713,6 +3803,21 @@ function ctrlpiInstallFiles(form, existing = {}, kind = 'pico') {
       const parsed = JSON.parse(existing.config);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
     } catch { /* unreadable config: start a fresh one */ }
+  }
+  // options.keepOmitted (pico_ctrlpi_install): a key or name left out keeps the board's own,
+  // and a missing key becomes the default.
+  const keep = options.keepOmitted;
+  // The form's fields; key and SSID are required, and none may contain a line break.
+  let key = String(form?.key ?? '').trim();
+  if (!key && keep) key = String(config.api_key ?? '').trim() || CTRLPI_DEFAULT_KEY;
+  const keepName = keep && form?.name === undefined && typeof config.name === 'string';
+  const name = keepName ? config.name.trim() : String(form?.name ?? '').trim();
+  const ssid = String(form?.ssid ?? '');
+  const pass = String(form?.pass ?? '');
+  if (!key) throw httpError(400, 'API key is required');
+  if (!ssid) throw httpError(400, 'WiFi SSID is required');
+  for (const [label, value] of [['API key', key], ['Agent name', name], ['WiFi SSID', ssid], ['WiFi password', pass]]) {
+    if (/[\r\n]/.test(value)) throw httpError(400, label + ' cannot contain a line break');
   }
   config.api_key = key;
   if (name) config.name = name;
@@ -3911,6 +4016,13 @@ function createServer(options = {}) {
     if (p === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PAGE);
+      return;
+    }
+
+    // The ctrlPi icon for the browser tab.
+    if (p === '/favicon.ico') {
+      res.writeHead(200, { 'Content-Type': 'image/x-icon', 'Cache-Control': 'public, max-age=86400' });
+      res.end(fs.readFileSync(path.join(__dirname, 'favicon.ico')));
       return;
     }
 
@@ -4199,26 +4311,9 @@ function createServer(options = {}) {
 
     // "Install ctrlPi API" (see ctrlpiInstallFiles).
     if (p === '/api/ctrlpi/install' && req.method === 'POST') {
-      await requireWritable(dev);
-      const kind = ctrlpiBoardKind(await probe(dev));
-      if (!kind) throw httpError(400, 'Install ctrlPi API needs a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython');
       let body;
       try { body = JSON.parse(await readBody(req)); } catch { throw httpError(400, 'Invalid JSON body'); }
-      // What the board already has: its config is kept, its sensor script is not replaced.
-      const existingPaths = new Set((await listFiles(dev, true)).map(f => String(f.path).replace(/^\//, '')));
-      const existing = {
-        config: existingPaths.has('config.json') ? (await readFile(dev, 'config.json')).toString('utf8') : null,
-        hasCpuTemp: existingPaths.has('scripts/cpu-temp.py'),
-      };
-      // Validate the form and fetch the agent before anything on the board is written.
-      const files = ctrlpiInstallFiles(body, existing, kind);
-      const agentFiles = await fetchCtrlpiAgent(kind);
-      // A leftover upgrade.lock would boot the upgrader and replace what is installed here.
-      if (existingPaths.has('upgrade.lock')) await removePath(dev, 'upgrade.lock');
-      for (const [file, buf] of agentFiles) await writeFile(dev, file, buf);
-      for (const [file, text] of files) await writeFile(dev, file, Buffer.from(text));
-      await resetBoard(dev, false);
-      sendJSON(res, 200, { ok: true, kind, keptConfig: existing.config !== null });
+      sendJSON(res, 200, await installCtrlpi(dev, body, fetchCtrlpiAgent));
       return;
     }
 
@@ -4468,10 +4563,12 @@ module.exports = {
       bootselDeviceOverride = null;
       bootselInstallOverride = null;
       espInstallOverride = null;
+      ctrlpiAgentOverride = null;
     },
     setBootselDevices(entries) { bootselDeviceOverride = entries; },
     setBootselInstaller(handler) { bootselInstallOverride = handler; },
     setEspInstaller(handler) { espInstallOverride = handler; },
+    setCtrlpiAgentFetcher(handler) { ctrlpiAgentOverride = handler; },
     setCircuitVolumes(entries) { circuitVolumeOverride = new Map(entries); },
     setDevices(entries) {
       ports.clear();

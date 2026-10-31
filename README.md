@@ -1,10 +1,11 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.32](https://img.shields.io/badge/version-0.9.32-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.33](https://img.shields.io/badge/version-0.9.33-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
-[![License: MIT](https://img.shields.io/badge/license-MIT-188038.svg)](LICENSE)
+[![Tools: 13](https://img.shields.io/badge/tools-13-006400.svg)](#mcp-tools)
+[![License: MIT](https://img.shields.io/badge/license-MIT-188038.svg)](https://github.com/ctrlpi/pico-bay/blob/main/LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
 [![Build Status](https://github.com/ctrlpi/pico-bay/actions/workflows/ci.yml/badge.svg)](https://github.com/ctrlpi/pico-bay/actions)
 
@@ -104,6 +105,8 @@ The server supports MCP revision `2026-07-28` and the legacy initialize flow thr
 | `pico_python_run` | Run a file as `__main__` or execute Python code and return its output. |
 | `pico_board_interrupt` | Send Ctrl-C to interrupt a running program. |
 | `pico_board_reset` | Soft-reset a board or request a supported hard reset. |
+| `pico_board_bootloader` | Put a board into BOOTSEL or ESP32 download mode for `pico_install`. |
+| `pico_ctrlpi_install` | Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3. |
 | `pico_install` | Check and install MicroPython on a Pico in BOOTSEL mode or a supported ESP32 in DOWNLOAD mode. |
 
 Call `pico_boards_list` first, then pass its `board_id` to board-specific tools. ZIP backup/restore, live console streaming, and **Delete all files** are intentionally not exposed through MCP.
@@ -327,12 +330,11 @@ The test suite covers parsing, ZIP handling, device discovery, HTTP and MCP APIs
 - **[`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api)**: ESP32 port of the GPIO REST server for MicroPython, with the same endpoints, wire format, and auth.
 - **[`mcp-bridge`](https://github.com/ctrlpi/mcp-bridge)**: MCP server that exposes GPIO control as tools for AI agents (e.g. Claude), executing them over the agents' REST API.
 - **[`homebridge-ctrlpi`](https://github.com/ctrlpi/homebridge-ctrlpi)**: A Homebridge plugin that brings Raspberry Pi, Pico W, and ESP32 GPIO into Apple Home, by driving one or more GPIO agents over their REST API.
-- **`homekit-bridge`** *(coming soon)*: Native Apple HomeKit bridge that exposes GPIO pins and sensors as HomeKit accessories, driven over the agents' REST API.
 - **`matter-bridge`** *(coming soon)*: Matter bridge that exposes GPIO pins and sensors to any Matter platform (Apple Home, Google Home, Alexa, Home Assistant), driven over the agents' REST API.
 - **[`ctrlpi-cli`](https://github.com/ctrlpi/ctrlpi-cli)**: Command-line interface for interacting with ctrlPi agents, with shared agent configuration.
 - **[`ctrlpi-lab`](https://github.com/ctrlpi/ctrlpi-lab)**: A local browser dashboard for your ctrlPi setup. Test GPIO and sensor endpoints, watch webhook events, and tail agent logs.
-- **`pi-bay`** *(coming soon)*: A local web app and MCP server for Raspberry Pi boards over the network. Edit files, open a remote terminal, and manage your Pi remotely.
+- **[`pi-bay`](https://github.com/ctrlpi/pi-bay)**: A local web app and MCP server for Raspberry Pi boards over the network. Edit files, open a remote terminal, and manage your Pi remotely.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/ctrlpi/pico-bay/blob/main/LICENSE)

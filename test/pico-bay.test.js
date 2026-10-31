@@ -1336,9 +1336,14 @@ describe('MCP protocol', () => {
       'pico_python_run',
       'pico_board_interrupt',
       'pico_board_reset',
+      'pico_board_bootloader',
+      'pico_ctrlpi_install',
       'pico_install',
     ]);
     assert.ok(first.result.tools.every(tool => !Object.hasOwn(tool, 'handler')));
+    // Same name as pi-bay's pi_files_list.
+    const filesList = first.result.tools.find(tool => tool.name === 'pico_files_list');
+    assert.deepEqual(Object.keys(filesList.inputSchema.properties), ['board_id', 'show_hidden']);
   });
 
   test('checks and installs MicroPython on a confirmed BOOTSEL model', async () => {
@@ -1556,6 +1561,20 @@ describe('ctrlPi API install', () => {
       { key: 'k', name: '', ssid: 's', pass: '' }, { config: '{broken', hasCpuTemp: false }));
     assert.deepEqual(JSON.parse(files['config.json']), { api_key: 'k' });
     assert.ok('scripts/cpu-temp.py' in files);
+  });
+
+  test('keepOmitted keeps the board\'s own key and name, and defaults a missing key', () => {
+    const config = files => JSON.parse(Object.fromEntries(files)['config.json']);
+    const own = { config: '{"api_key": "board-key", "name": "lab", "logs": true}', hasCpuTemp: true };
+    // Left out: the board's own values stay.
+    assert.deepEqual(config(viewer.ctrlpiInstallFiles({ ssid: 's' }, own, 'pico', { keepOmitted: true })),
+      { api_key: 'board-key', name: 'lab', logs: true });
+    // Given: they replace the board's; an empty name resets it to the agent's default.
+    assert.deepEqual(config(viewer.ctrlpiInstallFiles({ key: 'k', name: '', ssid: 's' }, own, 'pico', { keepOmitted: true })),
+      { api_key: 'k', logs: true });
+    // No config on the board: the default key, and the agent names itself.
+    assert.deepEqual(config(viewer.ctrlpiInstallFiles({ ssid: 's' }, {}, 'pico', { keepOmitted: true })),
+      { api_key: 'your-secret-key' });
   });
 
   test('refuses a missing key or SSID and any line break', () => {
@@ -1964,6 +1983,81 @@ describe('mocked HTTP API', () => {
     }
   });
 
+  test('installs the ctrlPi API through the pico_ctrlpi_install MCP tool', async () => {
+    const tool = viewer.MCP_TOOLS.find(t => t.name === 'pico_ctrlpi_install');
+    const writes = from => microPort.calls.slice(from).filter(c => /^_f = open\('/.test(c)).map(c => /open\('([^']+)'/.exec(c)[1]);
+    const saved = microPort.info;
+    microPort.info = { ...firmwareInfo('micropython', false), machine: 'Raspberry Pi Pico W with RP2040' };
+    viewer._test.setDevices([
+      { dev: '/dev/test-micropython', port: microPort },
+      { dev: '/dev/test-circuitpython', port: circuitPort },
+    ]);
+    viewer._test.setCtrlpiAgentFetcher(async () => [['app.mpy', FAKE_APP_MPY], ['upgrader.mpy', FAKE_UPGRADER_MPY], ['main.py', FAKE_MAIN_PY]]);
+    const args = { board_id: '/dev/test-micropython', api_key: 'k', wifi_ssid: 'home', wifi_password: 'p', name: 'lab' };
+    try {
+      // Nothing is read or written without the user's confirmation.
+      let from = microPort.calls.length;
+      await assert.rejects(tool.handler({ ...args, confirmed: false }), /confirmed must be true/);
+      assert.deepEqual(microPort.calls.slice(from), []);
+
+      from = microPort.calls.length;
+      const result = await tool.handler({ ...args, confirmed: true });
+      assert.equal(result.structuredContent.ok, true);
+      assert.equal(result.structuredContent.kind, 'pico');
+      assert.deepEqual(writes(from), ['app.mpy', 'upgrader.mpy', 'main.py', 'config.json', 'wifi.txt', 'scripts/cpu-temp.py']);
+
+      assert.equal(result.structuredContent.warning, undefined);
+
+      // Without api_key and name on a board with no config.json: the default key, with a warning.
+      const { api_key: _key, name: _name, ...bare } = args;
+      const defaulted = await tool.handler({ ...bare, confirmed: true });
+      assert.equal(defaulted.structuredContent.ok, true);
+      assert.match(defaulted.structuredContent.warning, /default API key your-secret-key/);
+
+      // A board no agent runs on is refused.
+      microPort.info = { ...firmwareInfo('micropython', false), machine: 'Raspberry Pi Pico with RP2040' };
+      await assert.rejects(tool.handler({ ...args, confirmed: true }), /needs a Pico W/);
+    } finally {
+      viewer._test.setCtrlpiAgentFetcher(null);
+      microPort.info = saved;
+      microPort.probeFailure = null;
+    }
+  });
+
+  test('pico_python_run waits timeout_ms, then interrupts a program still running', async () => {
+    const tool = viewer.MCP_TOOLS.find(t => t.name === 'pico_python_run');
+    assert.equal(viewer.MCP_TOOLS.find(t => t.name === 'pico_board_interrupt').annotations.destructiveHint, false);
+    const saved = { info: microPort.info, exec: microPort.exec, fd: microPort.fd };
+    microPort.info = { ...firmwareInfo('micropython', false), machine: 'Raspberry Pi Pico with RP2040' };
+    viewer._test.setDevices([
+      { dev: '/dev/test-micropython', port: microPort },
+      { dev: '/dev/test-circuitpython', port: circuitPort },
+    ]);
+    const timeouts = [];
+    try {
+      microPort.exec = async function (code, options = {}) {
+        timeouts.push(options.timeout);
+        this.calls.push(code);
+        return { out: 'ok\r\n', err: '' };
+      };
+      await tool.handler({ board_id: '/dev/test-micropython', code: 'print(1)' });
+      await tool.handler({ board_id: '/dev/test-micropython', code: 'print(1)', timeout_ms: 5000 });
+      assert.deepEqual(timeouts, [30000, 5000]);
+      await assert.rejects(tool.handler({ board_id: '/dev/test-micropython', code: 'print(1)', timeout_ms: '5' }), /timeout_ms must be an integer/);
+
+      // A program that outlives the limit gets Ctrl-C.
+      microPort.fd = 7;
+      microPort.exec = async () => { throw new Error('timed out waiting for the board ("\\x04")'); };
+      const from = microPort.calls.length;
+      await assert.rejects(tool.handler({ board_id: '/dev/test-micropython', code: 'while True: pass', timeout_ms: 1000 }),
+        /still running after 1000 ms and was interrupted with Ctrl-C/);
+      assert.ok(microPort.calls.slice(from).some(c => c.includes('\x03')), 'Ctrl-C is sent');
+    } finally {
+      Object.assign(microPort, saved);
+      microPort.probeFailure = null;
+    }
+  });
+
   test('keeps MicroPython write, folder, delete, and run routes available', async () => {
     microPort.info.machine = 'Raspberry Pi Pico with RP2040';
     const dev = encodeURIComponent('/dev/test-micropython');
@@ -1984,6 +2078,34 @@ describe('mocked HTTP API', () => {
     assert.equal(bootloader.response.status, 200);
     assert.equal(bootloader.body.ok, true);
     assert.ok(microPort.calls.includes('import machine\nmachine.bootloader()'));
+  });
+
+  test('puts a MicroPython board into BOOTSEL through the pico_board_bootloader MCP tool', async () => {
+    // The previous test's BOOTSEL reboot cleared the fake board's info, as a real reboot does.
+    const saved = microPort.info;
+    microPort.info = { ...firmwareInfo('micropython', false), machine: 'Raspberry Pi Pico with RP2040' };
+    microPort.calls = [];
+    viewer._test.setDevices([
+      { dev: '/dev/test-micropython', port: microPort },
+      { dev: '/dev/test-circuitpython', port: circuitPort },
+    ]);
+    try {
+      const result = await viewer.MCP_TOOLS.find(tool => tool.name === 'pico_board_bootloader')
+        .handler({ board_id: '/dev/test-micropython' });
+      assert.equal(result.structuredContent.ok, true);
+      assert.equal(result.structuredContent.board_id, '/dev/test-micropython');
+      assert.ok(microPort.calls.includes('import machine\nmachine.bootloader()'));
+    } finally {
+      microPort.info = saved;
+      microPort.probeFailure = null;
+    }
+  });
+
+  test('serves the ctrlPi favicon', async () => {
+    const response = await fetch(baseUrl + '/favicon.ico');
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/x-icon');
+    assert.ok((await response.arrayBuffer()).byteLength > 1000);
   });
 
   test('serves modern MCP over the shared HTTP server', async () => {
@@ -2018,7 +2140,7 @@ describe('mocked HTTP API', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/list', params: {} }),
     });
     assert.equal(legacy.status, 200);
-    assert.equal((await legacy.json()).result.tools.length, 11);
+    assert.equal((await legacy.json()).result.tools.length, 13);
 
     const foreign = await fetch(baseUrl + '/mcp', {
       method: 'POST',
