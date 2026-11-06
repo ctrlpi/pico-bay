@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ctrlpi/pico-bay",
+  "description": "App and MCP server for Raspberry Pi Pico and ESP32 boards over USB: files, console, firmware.",
+  "repository": {
+    "url": "https://github.com/ctrlpi/pico-bay",
+    "source": "github"
+  },
+  "version": "0.9.34",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@ctrlpi/pico-bay",
+      "version": "0.9.34",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "--mcp-stdio",
+          "valueHint": "transport"
+        }
+      ]
+    }
+  ]
+}

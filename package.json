@@ -1,6 +1,7 @@
 {
   "name": "@ctrlpi/pico-bay",
-  "version": "0.9.33",
+  "version": "0.9.34",
+  "mcpName": "io.github.ctrlpi/pico-bay",
   "description": "An App and MCP Server for managing Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython over USB.",
   "keywords": [
     "raspberry-pi-pico",
@@ -35,7 +36,7 @@
     "type": "git",
     "url": "git+https://github.com/ctrlpi/pico-bay.git"
   },
-  "homepage": "https://github.com/ctrlpi/pico-bay#readme",
+  "homepage": "https://ctrlpi.com",
   "bugs": {
     "url": "https://github.com/ctrlpi/pico-bay/issues"
   },

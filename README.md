@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.33](https://img.shields.io/badge/version-0.9.33-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.34](https://img.shields.io/badge/version-0.9.34-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![Tools: 13](https://img.shields.io/badge/tools-13-006400.svg)](#mcp-tools)
@@ -58,13 +58,17 @@ pico-bay includes a dependency-free [Model Context Protocol](https://modelcontex
 In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers` enabling stdio:
 
 ```json
-"mcpServers": {
-  "pico-bay": {
-    "command": "npx",
-    "args": ["-y", "@ctrlpi/pico-bay", "--mcp-stdio"]
+{
+  "mcpServers": {
+    "pico-bay": {
+      "command": "npx",
+      "args": ["-y", "@ctrlpi/pico-bay", "--mcp-stdio"]
+    }
   }
 }
 ```
+
+Cursor takes the same JSON, here and under Streamable HTTP. Put it in `~/.cursor/mcp.json`, or in `.cursor/mcp.json` inside a project.
 
 ### Streamable HTTP
 
@@ -77,10 +81,12 @@ npx @ctrlpi/pico-bay --mcp-http
 The normal web interface remains available and MCP is served at `http://HOST:7426/mcp`. Configure the MCP agent to connect over HTTP, replacing `PI_HOST_ADDR` with the platform running pico-bay:
 
 ```json
-"mcpServers": {
-  "pico-bay": {
-    "command": "npx",
-    "args": ["-y", "mcp-remote", "http://PI_HOST_ADDR:7426/mcp", "--allow-http"]
+{
+  "mcpServers": {
+    "pico-bay": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://PI_HOST_ADDR:7426/mcp", "--allow-http"]
+    }
   }
 }
 ```
@@ -242,6 +248,7 @@ pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS
   </tbody>
 </table>
 
+No environment variables are required: each one in the table is an optional alternative to its flag.
 Command-line values take precedence over environment variables.
 Boolean environment variables accept `true` or `false`, and `1` or `0`.
 
