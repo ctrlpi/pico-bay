@@ -12,11 +12,11 @@ This file provides guidance to Claude Code when working in this repository.
 
 The app uses only Node.js built-in modules for its JavaScript runtime and has no frontend build step. On Windows, it compiles [combridge.cs](combridge.cs) into a native serial helper at startup using the installed .NET Framework C# compiler (`csc.exe`). The backend, serial protocol, firmware adapters, HTTP API, MCP server, and BOOTSEL installer live in [pico-bay.js](pico-bay.js). The standalone frontend is [page.html](page.html).
 
-The npm package is **`@ctrlpi/pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `combridge.cs`, `page.html`, `favicon.ico` (the ctrlPi icon, served at `/favicon.ico`), `README.md`, `test`, and `LICENSE`.
+The npm package is **`pico-bay`**. Its executable is `pico-bay.js`, and the package includes `pico-bay.js`, `combridge.cs`, `page.html`, `favicon.ico` (the ctrlPi icon, served at `/favicon.ico`), `README.md`, `test`, and `LICENSE`.
 
 ## Location
 
-This repository lives at `pico-bay/` inside the ctrlpi workspace folder, next to the other ctrlpi projects. It is its own git repository (the workspace root gitignores it), and the workspace root `CLAUDE.md` rules apply here too. Releases reach the Production copy through the root `copy_to_prod.py` (checked with `chk_prod.py`), and the b4 test Pi runs `npm test` on it from cron through `pi4-scripts/pico_tests.sh`. Publishing is described in the root `CLAUDE.md` only.
+This repository lives at `pico-bay/` inside the ctrlpi workspace folder, next to the other ctrlpi projects. It is its own git repository (the workspace root gitignores it), and the workspace root `CLAUDE.md` rules apply here too. Publishing is described in the root `CLAUDE.md` only.
 
 ## Running
 
@@ -33,12 +33,12 @@ node pico-bay.js --version
 
 Configuration precedence is command line, environment, then default:
 
-- Port: `--port`, `PICO_PORT`, `7426`.
+- Port: `--port`, `PICO_PORT`, `7426`. On a busy port (`listenOnFreePort()`) a pico-bay already running there is opened in the browser and no second copy starts (two would fight over the serial ports). When another program holds it, the next 3 ports are tried, only for the default port on a desktop without HTTP MCP; otherwise it fails with the port-in-use message.
 - Host: `--host`, `PICO_HOST`, then `127.0.0.1`; Raspberry Pi hosts default to `0.0.0.0`.
 - Allowed host names: `--allow-host` (repeatable or comma-separated) plus `PICO_ALLOW_HOSTS`. `hostAllowed()` checks the `Host` header on every route, `/mcp` included, against DNS rebinding: IP addresses, `localhost`, `os.hostname()` (with or without `.local`), the `--host` value and these names pass, anything else gets `403`.
 - Serial hold: `--hold`, `PICO_HOLD_MS`, `900` milliseconds.
 - Browser launch: `--no-open` or `PICO_NO_OPEN`; Raspberry Pi hosts never open a browser.
-- MCP: `--mcp-stdio`/`PICO_MCP_STDIO` or `--mcp-http`/`PICO_MCP_HTTP`. Raspberry Pi hosts enable HTTP MCP by default; `--no-mcp`/`PICO_NO_MCP` disables all MCP transports.
+- MCP: `--mcp-stdio`/`PICO_MCP_STDIO` or `--mcp-http`/`PICO_MCP_HTTP`. Raspberry Pi hosts enable HTTP MCP by default; `--no-mcp`/`PICO_NO_MCP` disables all MCP transports. With none of these set and stdin a pipe or socket, `detectMcpStdio()` reads the first line: a JSON-RPC message starts stdio MCP; anything else, a closed stdin or 2 seconds of silence starts the web app.
 
 Boolean environment values accept `true`, `false`, `1`, or `0`.
 
@@ -61,16 +61,24 @@ Important HTTP routes include:
 - `/api/esp/install` and `/api/esp/install/status` for confirmed background MicroPython installation and progress through the ESP ROM loader.
 - `/api/storage/initialize` for explicitly confirmed recovery of an uninitialized ESP32 MicroPython VFS partition.
 - `/api/readme` for the full-screen README view.
-- `/api/ctrlpi/install` for "Install ctrlPi API": `ctrlpiBoardKind()` picks the agent from the board (`pico-gpio-api` on a Pico W / Pico 2 W, `esp32-gpio-api` on an ESP32, ESP32-S3 or ESP32-C3 running MicroPython; anything else is a `400`). `downloadCtrlpiAgent()` fetches its files from the project's GitHub `main` branch (`CTRLPI_AGENTS`: `app.mpy`, `upgrader.mpy` and `main.py`, plus `boot.py` on the ESP32; `upgrader.mpy` runs the agent's own `/upgrade`, and a board without it answers that with `500`), `ctrlpiFileError()` checks each the way the agent's upgrader does (`.mpy` header and size for both `.mpy` files), a leftover `upgrade.lock` is deleted first (it would boot the upgrader over the new files), and they are written with `main.py` last, then `config.json` (the board's own kept, with the new key and name), `wifi.txt`, and a `scripts/cpu-temp.py` for that board when it has none. `page.html` offers the menu item on the same boards. `installCtrlpi()` does the work for this route and for the `pico_ctrlpi_install` MCP tool (which needs `confirmed: true`). The tool passes `keepOmitted` to `ctrlpiInstallFiles()`: a key or name left out keeps the board's own, a missing key becomes `your-secret-key`, and a default key adds a `warning` to the result.
+- `/api/ctrlpi/install` for "Install ctrlPi API": `ctrlpiBoardKind()` picks the agent from the board (`pico-gpio-api` on a Pico W / Pico 2 W, `esp32-gpio-api` on any ESP32 running MicroPython (the agent officially supports the ESP32, ESP32-S3 and ESP32-C3); anything else is a `400`). `downloadCtrlpiAgent()` fetches its files from the project's GitHub `main` branch (`CTRLPI_AGENTS`: `app.mpy`, `upgrader.mpy` and `main.py`, plus `boot.py` on the ESP32; `upgrader.mpy` runs the agent's own `/upgrade`, and a board without it answers that with `500`), `ctrlpiFileError()` checks each the way the agent's upgrader does (`.mpy` header and size for both `.mpy` files), a leftover `upgrade.lock` is deleted first (it would boot the upgrader over the new files), and they are written with `main.py` last, then `config.json` (the board's own kept, with the new key and name), `wifi.txt`, and a `scripts/cpu-temp.py` for that board when it has none. `page.html` offers the menu item on the same boards, and shows it greyed out on every other running board (a Pico without WiFi, any board running CircuitPython). An ESP32 chip the agent does not officially support (S2, C5, C6) is allowed: the menu item and the form carry a "not officially supported" note. A disabled menu item is grey whatever its own colour (the red Delete all files, the blue Install ctrlPi API). `installCtrlpi()` does the work for this route and for the `pico_ctrlpi_install` MCP tool (which needs `confirmed: true`). A key left empty, in the form or the tool, keeps the board's own and becomes `your-secret-key` on a board without one; the form shows that default in grey and does not require a key, and the result's `defaultKey` makes the page add the public-key warning to its success message. The tool passes `keepOmitted` to `ctrlpiInstallFiles()`, so a name left out keeps the board's own too, and a default key adds a `warning` to its result.
 - `/mcp` when Streamable HTTP MCP is enabled.
+
+The `pico_ui` MCP tool opens this web UI (`openUi()`) or, with `action: "stop"`, stops it (`stopUi()`). Under stdio MCP no web server runs, so `ensureUiServer()` starts one on the first call, on the port or one of the next 3, or uses a pico-bay already running there; it lives until the client closes stdin. The browser opens only on a local desktop. For a client elsewhere (a Raspberry Pi host, a non-loopback `Host` on HTTP MCP, `SSH_CONNECTION` under stdio) or with `--no-open`, the result is `opened: false` and the `url` to open: the request's `Host`, the ssh session's address, else the first LAN address. Stop closes only a server the tool started; the app's own server and another running pico-bay stay up (`stopped: false`).
 
 ## Serial and device constraints
 
 - **Node has no serial API.** On macOS and Linux, ports are opened with `fs.openSync(dev, O_RDWR|O_NOCTTY)` and configured through `stty`. macOS uses `-f`, Linux uses `-F`, and macOS must use `cu.*` devices rather than `tty.*`.
 
+- **Exclusive ports and the serial helper.** Node cannot make ioctl calls, so one helper script runs on the open descriptor (fd 3) with its mode as the argument: `SERIAL_HELPER_PERL`, with the same script in Python (`SERIAL_HELPER_PYTHON`) as the backup, then none (`runSerialHelper()`). `lock` marks a port exclusive right after `stty` (which opens the device itself, so it must run first): a later open by any other program, another pico-bay included, fails with `EBUSY`. `unlock` clears it just before the close, so a stalled close cannot keep a port locked; the system also clears it on close, exit or crash, and no lock file exists. The other modes are the ESP32 DTR/RTS reset sequences (`resetEspLines()`); keep the two scripts identical in behaviour. An `EBUSY` open reports `Board is in use by <program> (PID n)` (`portHolder()`, from `lsof`), keeps the board's cached record, retries its probe every 3 s, and shows the board as a red BUSY pill. Startup and the hardware tests warn when another pico-bay is running (`otherPicoBayWarning()`). Root ignores exclusive mode. `PICO_TEST_SERIAL_HELPER=perl|python|none` picks the helper for a test run.
+
 - **Windows serial bridge.** [combridge.cs](combridge.cs) (`ComBridge`) opens and configures COM ports through Win32 APIs, streams serial data through standard input/output, and receives DTR/RTS commands over a named pipe. Windows port discovery reads `HKLM\HARDWARE\DEVICEMAP\SERIALCOMM`. At startup, the app locates `csc.exe` in the .NET Framework v4 `Framework64` or `Framework` directory and compiles the helper if its versioned `pico-bay-combridge-<version>.exe` is absent from the system temporary directory. Startup fails if the compiler is unavailable. Keep the helper source in the npm package; when changing it during development, remove the cached executable or change the package version so it is rebuilt.
 
 - **`min 0 time 1` is required.** It prevents a raw TTY read from blocking the server indefinitely when no bytes are available.
+
+- **Opening never blocks.** A system open of a troubled port can wait for over a minute, and a synchronous one stops every other board. `_openNow()` opens the tty, the write descriptor, `stty` and the `lock` helper asynchronously, in that order. `_openDescriptor()` gives the open 10 s (`OPEN_TIMEOUT_MS`), then fails that board with `USB serial port did not open in 10 s`; the system open still running is kept in `pendingOpen` (one per port), reused by the next attempt, and closed if it returns with nobody waiting. `_open()` shares one open among callers (`opening`). Keep it free of `...Sync` calls.
+
+- **Writes never block.** A blocking write to a board that stopped reading freezes the whole process, timers included. `_open()` opens a second descriptor (`wfd`, `O_WRONLY|O_NONBLOCK`) before the port is locked, and `_writeAll()` and `shutdown()` write through it: a write retries on `EAGAIN` and fails with `timed out waiting for the board (it accepts no data)` after 5 s without progress (`WRITE_TIMEOUT_MS`). Never write to `fd` when `wfd` is open.
 
 - **Preserve unread bytes.** `readUntil()` must keep bytes after its match because a USB packet can contain both the token and following payload. `readN()` and raw-paste flow control depend on the same persistent receive buffer.
 
@@ -108,6 +116,10 @@ ESP32, ESP32-S2, ESP32-C3, and ESP32-S3 ROM download mode appears as a red DOWNL
 
 Keep new UI consistent with the existing colors, shared dialogs and tooltips, firmware-colored pills, resizable sidebar and console, full-screen README and BOOTSEL views, and top connection/power/mount warnings. Selecting a board or scanning exits the full-screen README view.
 
+## Online version: keep feature parity
+
+The sibling `pico-online` project serves this app in the browser over Web Serial. It builds its page from this project's `page.html` as it is, and its `backend.js` is a port of the serial layer, raw REPL, board-side code, ZIP handling and `/api/*` routes of `pico-bay.js`. A feature or fix here (a route, its JSON, board-side code, a UI element the online scripts hook) needs the same change in `pico-online`, then its `node build.js` and `node --test`. All of its code and tests live there, none here.
+
 ## Testing
 
 Run the complete dependency-free suite with:
@@ -116,7 +128,7 @@ Run the complete dependency-free suite with:
 npm test
 ```
 
-The test suite in `test/` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP, BOOTSEL installation, and ESP32 ROM installation.
+The test suite in `test/` covers parsing, ZIP handling, firmware detection, multiple-board isolation, mounted-volume behavior, mocked HTTP routes, MCP (stdio detection, `pico_ui`, busy ports), BOOTSEL installation, and ESP32 ROM installation.
 
 After the non-hardware tests pass, the suite scans for connected boards. With no board, the physical section is skipped. MicroPython and writable CircuitPython boards receive temporary file/folder write-read-delete checks. Read-only CircuitPython boards receive non-destructive capability and console checks. Each firmware uses its own protocol path, and all temporary files must be removed in `finally` cleanup.
 

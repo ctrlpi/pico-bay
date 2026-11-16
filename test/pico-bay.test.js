@@ -872,6 +872,9 @@ describe('pure helpers', () => {
     assert.match(html, /class="moon-icon"/);
     assert.match(html, /body\.dark-mode/);
     assert.match(html, /<div id="menu">[\s\S]*?https:\/\/pico-bay\.ctrlpi\.com\/pinout\/pico/);
+    // The link becomes the ESP32 pinout while an ESP32 is selected.
+    assert.match(html, /pinoutLink\.textContent = espBoard \? 'ESP32 Pinout ↗' : 'Pico Pinout ↗';/);
+    assert.match(html, /pinoutLink\.href = 'https:\/\/pico-bay\.ctrlpi\.com\/pinout\/' \+ \(espBoard \? 'esp32' : 'pico'\);/);
   });
 
   test('serves page.html with enter download mode button on watchdog reset failure', () => {
@@ -1088,6 +1091,10 @@ describe('pure helpers', () => {
     assert.ok(lines.some(line => line.includes('1234')));
     assert.ok(lines.includes('Or choose another port: pico-bay --port 7427'));
     assert.ok(lines.includes('From this source folder: npm start -- --port 7427'));
+    const tried = viewer.portInUseLines('127.0.0.1', 7426, { command: 'node', pid: '1234' }, 3);
+    assert.equal(tried[0], 'Ports 7426 to 7429 are already in use: 127.0.0.1');
+    assert.ok(tried.includes('Port 7426 is used by: node (PID 1234)'));
+    assert.ok(tried.includes('Or choose another port: pico-bay --port 7430'));
   });
 
   test('cleans up immediately when a serial device disappears before opening', async () => {
@@ -1338,6 +1345,7 @@ describe('MCP protocol', () => {
       'pico_board_reset',
       'pico_board_bootloader',
       'pico_ctrlpi_install',
+      'pico_ui',
       'pico_install',
     ]);
     assert.ok(first.result.tools.every(tool => !Object.hasOwn(tool, 'handler')));
@@ -1563,6 +1571,34 @@ describe('ctrlPi API install', () => {
     assert.ok('scripts/cpu-temp.py' in files);
   });
 
+  test('an empty key keeps the board\'s own, else the default', () => {
+    const config = files => JSON.parse(Object.fromEntries(files)['config.json']);
+    const own = { config: '{"api_key": "board-key", "name": "lab"}', hasCpuTemp: true };
+    for (const form of [{ key: '', name: 'lab', ssid: 's' }, { key: '   ', name: 'lab', ssid: 's' }, { name: 'lab', ssid: 's' }]) {
+      assert.equal(config(viewer.ctrlpiInstallFiles(form, own)).api_key, 'board-key');
+      assert.equal(config(viewer.ctrlpiInstallFiles(form, {})).api_key, 'your-secret-key');
+      assert.equal(config(viewer.ctrlpiInstallFiles(form, { config: '{"api_key": ""}' })).api_key, 'your-secret-key');
+    }
+    assert.throws(() => viewer.ctrlpiInstallFiles({ key: '', ssid: '' }, {}), /WiFi SSID is required/);
+  });
+
+  test('Install ctrlPi API is shown greyed out on a board it cannot run on, and a disabled menu item is grey', () => {
+    const page = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
+    assert.match(page, /var circuitPython = !!device && device\.firmware === 'circuitpython';/);
+    assert.match(page, /ctrlPiBtn\.style\.display = on \? 'block' : 'none';/);
+    assert.match(page, /if \(!ctrlPiKind\) ctrlPiBtn\.disabled = true;/);
+    // An ESP32 chip other than the classic, S3 and C3 is offered, with a note in the form.
+    assert.match(page, /var ctrlPiUnofficial = ctrlPiKind === 'esp32' && /);
+    assert.match(page, /<div id="ctrlpi-unofficial" hidden /);
+    assert.match(page, /#menu button\.danger:disabled, #menu #ctrlpi-install-btn:disabled \{ color: #8c959f !important; \}/);
+  });
+
+  test('the form shows the default key in grey and does not require one', () => {
+    const page = fs.readFileSync(path.join(PROJECT_DIR, 'page.html'), 'utf8');
+    assert.match(page, /<input id="ctrlpi-key" autocomplete="off" placeholder="your-secret-key">/);
+    assert.match(page, /<input id="ctrlpi-ssid" autocomplete="off" required>/);
+  });
+
   test('keepOmitted keeps the board\'s own key and name, and defaults a missing key', () => {
     const config = files => JSON.parse(Object.fromEntries(files)['config.json']);
     const own = { config: '{"api_key": "board-key", "name": "lab", "logs": true}', hasCpuTemp: true };
@@ -1577,8 +1613,8 @@ describe('ctrlPi API install', () => {
       { api_key: 'your-secret-key' });
   });
 
-  test('refuses a missing key or SSID and any line break', () => {
-    for (const form of [{ ssid: 's' }, { key: 'k' }, { key: 'k', ssid: 's', pass: 'a\rb' }, { key: 'k\nx', ssid: 's' }]) {
+  test('refuses a missing SSID and any line break', () => {
+    for (const form of [{ key: 'k' }, { key: 'k', ssid: 's', pass: 'a\rb' }, { key: 'k\nx', ssid: 's' }]) {
       assert.throws(() => viewer.ctrlpiInstallFiles(form, {}), error => error.status === 400);
     }
   });
@@ -1590,8 +1626,12 @@ describe('ctrlPi API install', () => {
     assert.equal(kind('Generic ESP32 module with ESP32'), 'esp32');
     assert.equal(kind('ESP32S3 module with ESP32S3'), 'esp32');
     assert.equal(kind('ESP32C3 module with ESP32C3'), 'esp32');
-    assert.equal(kind('ESP32-S2 module with ESP32-S2'), null);
+    // Allowed, but not officially supported.
+    assert.equal(kind('ESP32-S2 module with ESP32-S2'), 'esp32');
+    assert.equal(kind('ESP32C6 module with ESP32C6'), 'esp32');
+    assert.equal(kind('ESP32C5 module with ESP32C5'), 'esp32');
     assert.equal(kind('Generic ESP32 module with ESP32', 'circuitpython'), null);
+    assert.equal(kind('Raspberry Pi Pico W with rp2040', 'circuitpython'), null);
     assert.equal(kind('Raspberry Pi Pico with RP2040'), null, 'no Wi-Fi, no agent');
   });
 
@@ -2140,7 +2180,7 @@ describe('mocked HTTP API', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/list', params: {} }),
     });
     assert.equal(legacy.status, 200);
-    assert.equal((await legacy.json()).result.tools.length, 13);
+    assert.equal((await legacy.json()).result.tools.length, 14);
 
     const foreign = await fetch(baseUrl + '/mcp', {
       method: 'POST',
@@ -2430,8 +2470,12 @@ describe('MCP stdio process', () => {
       params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
     }) + '\n');
     const exitCode = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`MCP stdio child did not exit in 20 s\nstdout: ${stdout}\nstderr: ${stderr}`));
+      }, 20000);
       child.once('error', reject);
-      child.once('close', resolve);
+      child.once('close', code => { clearTimeout(timer); resolve(code); });
     });
     assert.equal(exitCode, 0, stderr);
     const lines = stdout.trim().split('\n');
@@ -2440,11 +2484,382 @@ describe('MCP stdio process', () => {
     assert.equal(response.id, 30);
     assert.equal(response.result.serverInfo.name, 'pico-bay');
   });
+
+  test('starts without a flag when an MCP client talks on stdin', async () => {
+    const env = { ...process.env, PICO_NO_OPEN: '1' };
+    delete env.PICO_MCP_STDIO;
+    delete env.PICO_MCP_HTTP;
+    delete env.PICO_NO_MCP;
+    const child = spawn(process.execPath, ['pico-bay.js'], {
+      cwd: PROJECT_DIR, env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.stdin.end(JSON.stringify({
+      jsonrpc: '2.0', id: 31, method: 'initialize',
+      params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+    }) + '\n' + JSON.stringify({ jsonrpc: '2.0', id: 32, method: 'ping' }) + '\n');
+    const exitCode = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`MCP stdio child did not exit in 20 s\nstdout: ${stdout}\nstderr: ${stderr}`));
+      }, 20000);
+      child.once('error', reject);
+      child.once('close', code => { clearTimeout(timer); resolve(code); });
+    });
+    assert.equal(exitCode, 0, stderr);
+    const replies = stdout.trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(replies.map(reply => reply.id), [31, 32]);
+    assert.equal(replies[0].result.serverInfo.name, 'pico-bay');
+  });
+});
+
+describe('pico_ui', () => {
+  const call = (context) => viewer.dispatchMcp({
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'pico_ui', arguments: {} },
+  }, context);
+  let opened;
+  before(() => {
+    viewer._test.setUiServerPort(7999);
+    viewer._test.setBrowserOpener(url => opened.push(url));
+  });
+  after(() => {
+    viewer._test.setUiServerPort(null);
+    viewer._test.setBrowserOpener(null);
+  });
+
+  test('opens the local browser on a desktop', async () => {
+    opened = [];
+    const result = await viewer.openUi({}, { raspberryPiHost: false, noOpen: false, env: {} });
+    assert.deepEqual(result, { url: 'http://localhost:7999', opened: true });
+    assert.deepEqual(opened, ['http://localhost:7999']);
+  });
+
+  test('returns the address instead when the client is on another computer', async () => {
+    opened = [];
+    const pi = { raspberryPiHost: true, noOpen: false };
+    // HTTP MCP: the host the client reached.
+    const overHttp = await viewer.openUi({ host: 'b4.local:7426' }, { ...pi, env: {} });
+    assert.equal(overHttp.url, 'http://b4.local:7426');
+    assert.equal(overHttp.opened, false);
+    // stdio over ssh: the address the session came in on.
+    const overSsh = await viewer.openUi({}, { ...pi, env: { SSH_CONNECTION: '192.168.1.5 50000 192.168.1.44 22' } });
+    assert.equal(overSsh.url, 'http://192.168.1.44:7999');
+    // Not a Pi, but reached over ssh or by a LAN address.
+    const desktop = { raspberryPiHost: false, noOpen: false };
+    assert.equal((await viewer.openUi({}, { ...desktop, env: { SSH_CONNECTION: 'fe80::1 5 fe80::2 22' } })).url,
+      'http://[fe80::2]:7999');
+    assert.equal((await viewer.openUi({ host: '192.168.1.9:7426' }, { ...desktop, env: {} })).opened, false);
+    assert.equal((await viewer.openUi({ host: 'localhost:7426' }, { ...desktop, env: {} })).opened, true);
+    assert.deepEqual(opened, ['http://localhost:7999']);
+  });
+
+  test('--no-open returns the address without opening', async () => {
+    opened = [];
+    const result = await viewer.openUi({}, { raspberryPiHost: false, noOpen: true, env: {} });
+    assert.equal(result.url, 'http://localhost:7999');
+    assert.equal(result.opened, false);
+    assert.deepEqual(opened, []);
+  });
+
+  test('action stop leaves a server it did not start', async () => {
+    const result = await viewer.stopUi();
+    assert.equal(result.stopped, false);
+    assert.match(result.message, /not started by this tool/);
+    const bad = await viewer.dispatchMcp({
+      jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'pico_ui', arguments: { action: 'close' } },
+    });
+    assert.equal(bad.result.isError, true);
+  });
+
+  test('rejects unknown arguments', async () => {
+    const bad = await viewer.dispatchMcp({
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'pico_ui', arguments: { url: 'x' } },
+    });
+    assert.equal(bad.result.isError, true);
+    const reply = await call({ host: '10.0.0.7:7426' });
+    assert.equal(reply.result.structuredContent.url, 'http://10.0.0.7:7426');
+  });
+
+  test('serves the UI from a stdio MCP process', async () => {
+    const env = { ...process.env };
+    delete env.SSH_CONNECTION;
+    const child = spawn(process.execPath, ['pico-bay.js', '--mcp-stdio', '--port', '0', '--no-open'], {
+      cwd: PROJECT_DIR, env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    try {
+      child.stdout.setEncoding('utf8');
+      const reply = new Promise((resolve, reject) => {
+        let stdout = '';
+        child.once('error', reject);
+        child.once('close', () => reject(new Error('pico-bay exited: ' + stdout)));
+        child.stdout.on('data', chunk => {
+          stdout += chunk;
+          if (stdout.includes('\n')) resolve(JSON.parse(stdout.split('\n')[0]));
+        });
+      });
+      child.stdin.write(JSON.stringify({
+        jsonrpc: '2.0', id: 40, method: 'tools/call', params: { name: 'pico_ui', arguments: {} },
+      }) + '\n');
+      const result = (await reply).result.structuredContent;
+      assert.equal(result.opened, false);
+      const address = result.url.replace('localhost', '127.0.0.1');
+      const page = await fetch(address);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /pico-bay/i);
+
+      // action stop closes it, and a second stop has nothing to close.
+      const next = () => new Promise(resolve => {
+        let text = '';
+        const onData = chunk => {
+          text += chunk;
+          if (!text.includes('\n')) return;
+          child.stdout.off('data', onData);
+          resolve(JSON.parse(text.split('\n')[0]).result.structuredContent);
+        };
+        child.stdout.on('data', onData);
+      });
+      const stop = id => child.stdin.write(JSON.stringify({
+        jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'pico_ui', arguments: { action: 'stop' } },
+      }) + '\n');
+      let answer = next();
+      stop(41);
+      assert.deepEqual(await answer, { stopped: true });
+      await assert.rejects(fetch(address));
+      answer = next();
+      stop(42);
+      assert.equal((await answer).stopped, false);
+    } finally {
+      child.stdin.end();
+      child.kill();
+    }
+  });
+});
+
+describe('busy port', () => {
+  const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+  const close = server => new Promise(resolve => server.close(resolve));
+
+  test('moves to a following port when another program holds it', async () => {
+    const other = http.createServer();
+    const busy = await listen(other);
+    const server = http.createServer();
+    try {
+      const result = await viewer.listenOnFreePort(server, busy, '127.0.0.1', 3, async () => false);
+      assert.equal(result.existing, undefined);
+      assert.ok(result.port > busy && result.port <= busy + 3, 'port ' + result.port);
+      assert.equal(server.address().port, result.port);
+    } finally {
+      await close(server);
+      await close(other);
+    }
+  });
+
+  test('uses the same app already on the port instead of a second copy', async () => {
+    const other = http.createServer();
+    const busy = await listen(other);
+    const server = http.createServer();
+    try {
+      const result = await viewer.listenOnFreePort(server, busy, '127.0.0.1', 3, async port => port === busy);
+      assert.deepEqual(result, { port: busy, existing: true });
+      assert.equal(server.listening, false);
+    } finally {
+      await close(other);
+    }
+  });
+
+  test('fails on a busy port when no fallback is allowed', async () => {
+    const other = http.createServer();
+    const busy = await listen(other);
+    try {
+      await assert.rejects(
+        viewer.listenOnFreePort(http.createServer(), busy, '127.0.0.1', 0, async () => false),
+        { code: 'EADDRINUSE' });
+    } finally {
+      await close(other);
+    }
+  });
+});
+
+describe('serial port in use', () => {
+  test('finds the other pico-bay processes in a process list', () => {
+    const list = [
+      '  101 /usr/local/bin/node /Users/me/.npm/_npx/abc/node_modules/.bin/pico-bay --mcp-stdio',
+      '  102 node pico-bay.js --port 7426',
+      '  103 node /Users/me/Mobile Documents/ctrlpi/pico-bay/pico-bay.js',
+      '  104 npm exec pico-bay --mcp-stdio',
+      '  105 /Applications/Claude.app/Contents/Helpers/disclaimer --pgroup -- /usr/local/bin/npx -y pico-bay --mcp-stdio',
+      '  106 node /Users/me/ctrlpi/pico-bay/test/pico-bay.test.js',
+      '  107 node /Users/me/ctrlpi/pi-bay/server.js',
+      '  108 node pico-bay.js',
+    ].join('\n');
+    assert.deepEqual(viewer.picoBayPids(list, 108), [101, 102, 103]);
+    assert.equal(viewer.otherPicoBayWarning([]), null);
+    assert.match(viewer.otherPicoBayWarning([101, 102]), /Another pico-bay is running \(PID 101, 102\)/);
+  });
+
+  test('reads who holds a port from lsof, leaving itself out', () => {
+    assert.deepEqual(viewer.parseLsofHolders('p50\ncnode\np77\ncThonny\n', 50), [{ pid: 77, command: 'Thonny' }]);
+    assert.deepEqual(viewer.parseLsofHolders('', 50), []);
+  });
+});
+
+describe('serial writes that cannot block', () => {
+  function setup(t) {
+    const port = viewer.getPort('/dev/test-write');
+    port.fd = 42;
+    port.wfd = 43;
+    port.writeTimeout = 60;
+    t.after(() => { port.fd = null; port.wfd = null; viewer._test.clearDevices(); });
+    return port;
+  }
+  const again = () => { throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }); };
+
+  test('a short or refused write is retried until every byte is sent', async t => {
+    const port = setup(t);
+    const sent = [];
+    let call = 0;
+    t.mock.method(fs, 'writeSync', (fd, buf, off, len) => {
+      assert.equal(fd, 43);
+      if (++call % 2) again();
+      const n = Math.min(3, len);
+      sent.push(buf.subarray(off, off + n).toString());
+      return n;
+    });
+    await port.write('abcdefgh');
+    assert.equal(sent.join(''), 'abcdefgh');
+  });
+
+  test('a board that accepts no data fails the write, and the process keeps running', async t => {
+    const port = setup(t);
+    t.mock.method(fs, 'writeSync', again);
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 10);
+    try {
+      await assert.rejects(port.write('abc'), /timed out waiting for the board \(it accepts no data\); sent 0 of 3 bytes/);
+    } finally { clearInterval(timer); }
+    assert.ok(ticks >= 2, 'timers ran during the stalled write');
+  });
+
+  test('other write errors and a closed port stop the write at once', async t => {
+    const port = setup(t);
+    t.mock.method(fs, 'writeSync', () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); });
+    await assert.rejects(port.write('abc'), /EIO/);
+    port.fd = null;
+    await assert.rejects(port.write('abc'), /port closed/);
+  });
+
+  test('without the second descriptor the write uses the port itself', async t => {
+    const port = setup(t);
+    port.wfd = null;
+    const used = [];
+    t.mock.method(fs, 'writeSync', (fd, buf, off, len) => { used.push(fd); return len; });
+    await port.write('abc');
+    assert.deepEqual(used, [42]);
+  });
+});
+
+describe('serial open that cannot block', () => {
+  function setup(t) {
+    const port = viewer.getPort('/dev/test-open');
+    port.openTimeout = 40;
+    t.after(() => viewer._test.clearDevices());
+    return port;
+  }
+
+  test('an open that does not return fails after the time limit and is closed when it does', async t => {
+    const port = setup(t);
+    let finish;
+    const opens = t.mock.method(fs, 'open', (dev, flags, done) => { finish = done; });
+    const closed = [];
+    t.mock.method(fs, 'close', (fd, done) => { closed.push(fd); done(); });
+    await assert.rejects(port._openDescriptor(), /USB serial port did not open in 0 s/);
+    // The next attempt waits on the same system open instead of starting another.
+    await assert.rejects(port._openDescriptor(), /did not open/);
+    assert.equal(opens.mock.callCount(), 1);
+    finish(null, 77);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(closed, [77]);
+    assert.equal(port.pendingOpen, null);
+  });
+
+  test('an open that returns in time, or late while someone still waits, is used', async t => {
+    const port = setup(t);
+    const closed = t.mock.method(fs, 'close', (fd, done) => done());
+    // One mock, switched in place: mocking the same method twice does not restore cleanly.
+    const open = t.mock.method(fs, 'open', (dev, flags, done) => setTimeout(() => done(null, 55), 60));
+    await assert.rejects(port._openDescriptor(), /did not open/);
+    assert.equal(await port._openDescriptor(), 55);
+    assert.equal(closed.mock.callCount(), 0);
+    open.mock.mockImplementation((dev, flags, done) => done(Object.assign(new Error('EBUSY'), { code: 'EBUSY' })));
+    await assert.rejects(port._openDescriptor(), { code: 'EBUSY' });
+  });
+
+  test('callers that ask while the port is opening share one open', async t => {
+    const port = setup(t);
+    let finish;
+    const opening = t.mock.method(port, '_openNow', () => new Promise(resolve => { finish = resolve; }));
+    const both = Promise.all([port._open(), port._open()]);
+    finish();
+    await both;
+    assert.equal(opening.mock.callCount(), 1);
+    assert.equal(port.opening, null);
+  });
+});
+
+describe('MCP stdio detection', () => {
+  const { PassThrough } = require('node:stream');
+
+  test('recognises a JSON-RPC line only', () => {
+    assert.equal(viewer.isMcpLine('{"jsonrpc":"2.0","id":1,"method":"initialize"}'), true);
+    assert.equal(viewer.isMcpLine('{"jsonrpc":"1.0","method":"initialize"}'), false);
+    assert.equal(viewer.isMcpLine('{"hello":1}'), false);
+    assert.equal(viewer.isMcpLine('hello'), false);
+    assert.equal(viewer.isMcpLine('null'), false);
+  });
+
+  test('an MCP first line is detected and left in the stream', async () => {
+    const input = new PassThrough();
+    const line = '{"jsonrpc":"2.0","id":1,"method":"initialize"}\n';
+    const detected = viewer.detectMcpStdio(input, 1000);
+    input.write(line.slice(0, 10));
+    input.write(line.slice(10) + 'next');
+    assert.equal(await detected, true);
+    assert.equal(input.read().toString(), line + 'next');
+  });
+
+  test('other input, a closed stdin and silence are not MCP', async () => {
+    const text = new PassThrough();
+    const fromText = viewer.detectMcpStdio(text, 1000);
+    text.write('hello\n');
+    assert.equal(await fromText, false);
+
+    const closed = new PassThrough();
+    const fromClosed = viewer.detectMcpStdio(closed, 1000);
+    closed.end();
+    assert.equal(await fromClosed, false);
+
+    assert.equal(await viewer.detectMcpStdio(new PassThrough(), 20), false);
+  });
+
+  test('a terminal or /dev/null stdin is not a pipe', () => {
+    const fd = fs.openSync(os.devNull, 'r');
+    try { assert.equal(viewer.stdinIsPipe(fd), false); }
+    finally { fs.closeSync(fd); }
+    assert.equal(viewer.stdinIsPipe(-1), false);
+  });
 });
 
 describe('optional physical boards', () => {
   test('runs firmware-appropriate checks when boards are connected', async t => {
     viewer._test.clearDevices();
+    // PICO_TEST_SERIAL_HELPER=perl|python|none picks the helper for a run; the default tries Perl, then Python.
+    const helpers = { perl: 0, python: 1, none: 2 };
+    if (process.env.PICO_TEST_SERIAL_HELPER in helpers) viewer._test.setSerialHelper(helpers[process.env.PICO_TEST_SERIAL_HELPER]);
     if (process.env.CI) {
       t.skip('physical boards are not available in CI');
       return;
@@ -2456,6 +2871,8 @@ describe('optional physical boards', () => {
     }
 
     t.diagnostic('Scan found ' + devices.length + ' device(s): ' + devices.map(device => device.dev).join(', '));
+    const others = viewer.otherPicoBayWarning();
+    if (others) t.diagnostic('WARNING: ' + others + ' It can make these checks fail.');
     // Include bootloader boards in the report; only serial devices own ports.
     const ports = devices.filter(device => !device.bootMode || device.bootloader === 'esp-rom')
       .map(device => viewer.getPort(device.dev));
@@ -2490,6 +2907,8 @@ describe('optional physical boards', () => {
             await t.test('binary boundaries, overwrite, and truncation', () => testPhysicalBinaryFiles(device));
             await t.test('nested directories and file/folder renames', () => testPhysicalRenames(device));
           }
+          await t.test('port is exclusive while in use and free afterwards', t => testPhysicalExclusive(device, t));
+          await t.test('a write to a board that is not reading does not block', t => testPhysicalBusyWrite(device, t));
           await t.test('Python exception and command recovery', () => testPhysicalErrorRecovery(device));
           await t.test('run, interrupt, and run again', () => testPhysicalInterrupt(device));
         });
@@ -2499,6 +2918,68 @@ describe('optional physical boards', () => {
     }
   });
 });
+
+// A second process cannot open the board while pico-bay holds it, and can once it lets go.
+async function testPhysicalExclusive(device, t) {
+  if (process.platform === 'win32') { t.skip('COM ports are always exclusive on Windows'); return; }
+  const tryOpen = () => spawnSync(process.execPath, ['-e', `
+    const fs = require('fs');
+    try { fs.closeSync(fs.openSync(process.argv[1], fs.constants.O_RDWR | fs.constants.O_NOCTTY | fs.constants.O_NONBLOCK)); console.log('open'); }
+    catch (error) { console.log(error.code); }`, device.dev], { encoding: 'utf8' }).stdout.trim();
+  const port = viewer.getPort(device.dev);
+  let exclusive = false;
+  let during = '';
+  await port.command(async active => {
+    exclusive = active.exclusive;
+    during = tryOpen();
+  });
+  await port.releaseNow();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  if (!exclusive) { t.skip('no Perl or Python helper: the port is not locked'); return; }
+  assert.equal(during, 'EBUSY');
+  assert.equal(tryOpen(), 'open');
+}
+
+// While a board runs code it may stop taking input. The write then either gets through or
+// times out, timers keep running the whole time, and the board answers afterwards.
+async function testPhysicalBusyWrite(device, t) {
+  if (process.platform === 'win32') { t.skip('writes go through the serial bridge on Windows'); return; }
+  const port = viewer.getPort(device.dev);
+  const timeout = port.writeTimeout;
+  port.writeTimeout = 1000;
+  let ticks = 0, outcome = 'accepted';
+  const started = Date.now();
+  const timer = setInterval(() => { ticks++; }, 50);
+  try {
+    await port.command(async active => {
+      let sleeping;
+      const running = new Promise(resolve => { sleeping = resolve; });
+      const busy = active.exec("import time\nprint('PICO_BAY_BUSY')\ntime.sleep(3)", {
+        timeout: 15000,
+        onChunk: text => { if (text.includes('PICO_BAY_BUSY')) sleeping(); },
+      });
+      const done = busy.then(() => null, error => error);
+      await within(Promise.race([running, done.then(error => { throw error || new Error('finished before the write'); })]), 8000, 'board did not start the busy code');
+      // Line breaks only, so whatever reaches the board later is harmless.
+      try { await active.write('\r'.repeat(16384)); }
+      catch (error) {
+        if (!/timed out waiting for the board \(it accepts no data\)/.test(error.message)) throw error;
+        outcome = 'timed out';
+      }
+      const failed = await done;
+      if (failed) throw failed;
+    });
+  } finally {
+    clearInterval(timer);
+    port.writeTimeout = timeout;
+  }
+  const elapsed = Date.now() - started;
+  t.diagnostic('write ' + outcome + ', ' + ticks + ' timer ticks in ' + elapsed + ' ms');
+  assert.ok(ticks >= elapsed / 50 / 2, 'timers stopped during the write: ' + ticks + ' ticks in ' + elapsed + ' ms');
+  const recovered = await physicalTool(device, 'pico_python_run', { code: "print('PICO_BAY_AFTER_BUSY')" });
+  assert.equal(recovered.structuredContent.ok, true);
+  assert.equal(viewer.cleanReplOutput(recovered.structuredContent.out).trim(), 'PICO_BAY_AFTER_BUSY');
+}
 
 async function testPhysicalMicroPython(device) {
   const suffix = process.pid + '_' + Date.now().toString(36);

@@ -51,7 +51,7 @@ Options:
   --hold MILLISECONDS Board release delay
   --allow-host NAME   Also accept requests addressed to this host name
   --no-open           Do not open a browser
-  --mcp-stdio         Run MCP over stdio
+  --mcp-stdio         Run MCP over stdio (automatic when an MCP client starts pico-bay)
   --mcp-http          Enable MCP over HTTP
   --no-mcp            Disable MCP
   --help              Show this help
@@ -79,6 +79,8 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--no-mcp') cliNoMcp = true;
 }
 const PORT = parseInt(portArg || process.env.PICO_PORT || '7426', 10);
+// How many ports after PORT are tried when another program holds it.
+const PORT_FALLBACKS = 3;
 const RASPBERRY_PI_HOST = isRaspberryPi();
 // Loopback by default; a Pi listens on the LAN so another computer can open the UI.
 const HOST = hostArg || process.env.PICO_HOST || (RASPBERRY_PI_HOST ? '0.0.0.0' : '127.0.0.1');
@@ -124,11 +126,21 @@ const selectedMcp = selectMcpTransports({
 });
 const mcpStdio = selectedMcp.stdio;
 const mcpHttp = selectedMcp.http;
+// With no MCP flag or variable at all, a piped stdin is checked for an MCP client.
+const mcpAutodetect = !cliNoMcp && !cliMcpStdio && !cliMcpHttp &&
+  process.env.PICO_MCP_STDIO === undefined && process.env.PICO_MCP_HTTP === undefined;
+// A busy default port may move to the next ones, but never a port that was asked for, a
+// Raspberry Pi host or HTTP MCP: bookmarks and MCP clients are set to a fixed address.
+const portFallback = !portArg && !process.env.PICO_PORT && !RASPBERRY_PI_HOST && !mcpHttp;
 // --no-mcp together with an MCP flag is reported at startup.
 const conflictingMcpFlags = cliNoMcp && (cliMcpStdio || cliMcpHttp);
 
 // Delay before leaving raw REPL and restarting main.py. Zero resets immediately.
 const HOLD_MS = parseInt(holdArg || process.env.PICO_HOLD_MS || '900', 10);
+// How long a serial write waits on a board that accepts no data before it fails.
+const WRITE_TIMEOUT_MS = 5000;
+// How long opening a serial port may take before that board fails.
+const OPEN_TIMEOUT_MS = 10000;
 const README = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
 const LICENSE = fs.readFileSync(path.join(__dirname, 'LICENSE'), 'utf8');
 // Changes on every start, so an open page can tell the server restarted.
@@ -152,16 +164,99 @@ const execFileText = (file, argv, options = {}) => new Promise((resolve, reject)
   });
 });
 
-// Python helper that toggles DTR/RTS on the already-open serial descriptor (fd 3) to
-// reset an ESP32 or put it in download mode; Node cannot set modem lines itself. Each
-// mode is one sequence: a plain reset ('normal', 'usb-normal'), or download-mode entry
-// for native USB-Serial/JTAG, classic auto-reset circuits and the default timing
-// ('-slow' variants wait longer).
-const ESP_DTR_RTS_RESET = String.raw`
+// Node cannot make ioctl calls, so a small helper works on the already-open serial
+// descriptor (fd 3), in Perl with the same script in Python as a backup. Its argument is
+// the mode: 'lock' marks the port exclusive (TIOCEXCL: every later open by another
+// program fails with EBUSY; the system clears it on close, exit or crash), 'unlock'
+// clears it, and the others are DTR/RTS sequences that reset an ESP32 or put it in
+// download mode: a plain reset ('normal', 'usb-normal'), or download-mode entry for
+// native USB-Serial/JTAG, classic auto-reset circuits and the default timing ('-slow'
+// variants wait longer). Exit 2 means the helper cannot run on this system.
+const SERIAL_HELPER_PERL = String.raw`
+use strict; use POSIX ();
+my $mode = defined $ARGV[0] ? $ARGV[0] : 'tight';
+my $linux = $^O eq 'linux';
+exit 2 unless $linux || $^O eq 'darwin';
+# These Linux numbers are the generic ones; a few architectures use their own.
+exit 2 if $linux && (POSIX::uname())[4] =~ /mips|ppc|powerpc|sparc|alpha|parisc/i;
+my ($EXCL, $NXCL, $MGET, $MSET, $MBIS, $MBIC, $B115200) = $linux
+  ? (0x540C, 0x540D, 0x5415, 0x5418, 0x5416, 0x5417, 0x1002)
+  : (0x2000740d, 0x2000740e, 0x4004746a, 0x8004746d, 0x8004746c, 0x8004746b, 115200);
+my ($DTR, $RTS) = (2, 4);
+open(my $fh, '+<&=', 3) or exit 1;
+if ($mode eq 'lock') { ioctl($fh, $EXCL, 0) or exit 1; exit 0; }
+if ($mode eq 'unlock') { ioctl($fh, $NXCL, 0) or exit 1; exit 0; }
+my $attrs = POSIX::Termios->new;
+$attrs->getattr(3) or exit 1;
+$attrs->setcflag(($attrs->getcflag | POSIX::CLOCAL | POSIX::CREAD) & ~POSIX::HUPCL);
+$attrs->setispeed($B115200);
+$attrs->setospeed($B115200);
+$attrs->setcc(POSIX::VMIN, 0);
+$attrs->setcc(POSIX::VTIME, 1);
+$attrs->setattr(3, POSIX::TCSANOW) or exit 1;
+sub lines {
+  my ($dtr, $rts) = @_;
+  my $state = pack('I', 0);
+  ioctl($fh, $MGET, $state) or exit 1;
+  my $bits = unpack('I', $state) & ~($DTR | $RTS);
+  $bits |= $DTR if $dtr;
+  $bits |= $RTS if $rts;
+  ioctl($fh, $MSET, pack('I', $bits)) or exit 1;
+}
+sub line {
+  my ($bit, $on) = @_;
+  my $arg = pack('I', $bit);
+  ioctl($fh, $on ? $MBIS : $MBIC, $arg) or exit 1;
+}
+sub nap { select(undef, undef, undef, $_[0]); }
+my $delay = $mode =~ /-slow$/ ? 0.55 : 0.05;
+if ($mode eq 'usb-normal') {
+  line($DTR, 0); line($RTS, 1); line($DTR, 0);
+  nap(0.2);
+  line($RTS, 0); line($DTR, 0);
+  nap(0.2);
+} elsif ($mode eq 'normal') {
+  line($DTR, 0); line($RTS, 1); line($DTR, 0);
+  nap(0.1);
+  line($RTS, 0); line($DTR, 0);
+} elsif ($mode eq 'usb-jtag') {
+  # Espressif USB-Serial/JTAG reset sequence: DTR is reapplied after each RTS write.
+  my $dtr_state = 0;
+  my $dtr = sub { $dtr_state = $_[0]; line($DTR, $_[0]); };
+  my $rts = sub { line($RTS, $_[0]); line($DTR, $dtr_state); };
+  $rts->(0); $dtr->(0);
+  nap(0.1);
+  $dtr->(1); $rts->(0);
+  nap(0.1);
+  $rts->(1); $dtr->(0); $rts->(1);
+  nap(0.1);
+  $dtr->(0); $rts->(0);
+} elsif ($mode =~ /^classic/) {
+  line($DTR, 0); line($RTS, 1); line($DTR, 0);
+  nap(0.1);
+  line($DTR, 1); line($RTS, 0); line($DTR, 1);
+  nap($delay);
+  line($DTR, 0);
+} else {
+  lines(0, 0); lines(1, 1); lines(0, 1);
+  nap(0.1);
+  lines(1, 0);
+  nap($delay);
+  lines(0, 0);
+  line($DTR, 0);
+}
+exit 0;
+`;
+// The same helper in Python (standard library only).
+const SERIAL_HELPER_PYTHON = String.raw`
 import fcntl, os, struct, sys, termios, time
 # Inherit the parent's open serial descriptor; opening the device again can
 # change DTR/RTS and race with the parent's serial reader.
 fd = 3
+mode = sys.argv[1] if len(sys.argv) > 1 else 'tight'
+if mode == 'lock' or mode == 'unlock':
+    fcntl.ioctl(fd, termios.TIOCEXCL if mode == 'lock' else termios.TIOCNXCL)
+    sys.exit(0)
 attrs = termios.tcgetattr(fd)
 attrs[2] = (attrs[2] | termios.CLOCAL | termios.CREAD) & ~termios.HUPCL
 attrs[4] = termios.B115200
@@ -178,7 +273,6 @@ def lines(dtr, rts):
 def line(bit, on):
     request = termios.TIOCMBIS if on else termios.TIOCMBIC
     fcntl.ioctl(fd, request, struct.pack('I', bit))
-mode = sys.argv[1] if len(sys.argv) > 1 else 'tight'
 delay = 0.55 if mode.endswith('-slow') else 0.05
 if mode == 'usb-normal':
     line(termios.TIOCM_DTR, False)
@@ -240,22 +334,92 @@ else:
 os.close(fd)
 `;
 
-// Runs ESP_DTR_RTS_RESET on the open descriptor; killed after 3 s if it hangs.
-function resetEspLines(fd, mode) {
-  return new Promise((resolve, reject) => {
-    const child = spawn('python3', ['-c', ESP_DTR_RTS_RESET, mode], {
-      stdio: ['ignore', 'ignore', 'pipe', fd],
-    });
+// Perl first, Python as the backup, then none. serialHelper is the one in use: it moves
+// on for good when a helper is not installed or says it cannot run here (exit 2).
+const SERIAL_HELPERS = [['perl', ['-e', SERIAL_HELPER_PERL]], ['python3', ['-c', SERIAL_HELPER_PYTHON]]];
+let serialHelper = 0;
+const serialHelperMissing = (error, status) => (error && error.code === 'ENOENT') || status === 2;
+
+// Runs the helper in `mode` on the open descriptor; killed after `timeout` if it hangs. Resolves
+// { ok, missing, stderr }: missing when no helper is installed.
+function runSerialHelper(fd, mode, timeout = 3000) {
+  return new Promise(resolve => {
+    if (serialHelper >= SERIAL_HELPERS.length) return resolve({ ok: false, missing: true, stderr: '' });
+    const [command, argv] = SERIAL_HELPERS[serialHelper];
+    const child = spawn(command, [...argv, mode], { stdio: ['ignore', 'ignore', 'pipe', fd] });
     let stderr = '';
+    let failure = null;
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-2000); });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
-    child.once('error', error => { clearTimeout(timer); reject(error); });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    child.once('error', error => { failure = error; });
     child.once('close', code => {
       clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || 'DTR/RTS reset helper timed out or failed'));
+      if (serialHelperMissing(failure, code)) {
+        // Not installed or not usable here: nothing was done yet, so the next one may run.
+        serialHelper++;
+        resolve(runSerialHelper(fd, mode, timeout));
+      } else resolve({ ok: code === 0, missing: false, stderr: stderr.trim() });
     });
   });
+}
+
+// Runs a DTR/RTS sequence on the open descriptor.
+async function resetEspLines(fd, mode) {
+  const result = await runSerialHelper(fd, mode);
+  if (result.missing) throw new Error('Resetting an ESP32 needs Perl or Python 3');
+  if (!result.ok) throw new Error(result.stderr || 'DTR/RTS reset helper timed out or failed');
+}
+
+// Who has a serial device open, for the "in use" message: "pico-bay (PID 12)",
+// "Thonny (PID 34)", or "another program" when lsof cannot say.
+function parseLsofHolders(text, selfPid = process.pid) {
+  const holders = [];
+  let pid = null;
+  for (const line of String(text || '').split('\n')) {
+    if (line[0] === 'p') pid = Number(line.slice(1));
+    else if (line[0] === 'c' && pid && pid !== selfPid) holders.push({ pid, command: line.slice(1) });
+  }
+  return holders;
+}
+function portHolder(dev) {
+  if (process.platform === 'win32') return 'another program';
+  try {
+    const out = execFileSync('lsof', ['-Fpc', dev], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000,
+    });
+    const holder = parseLsofHolders(out)[0];
+    if (holder) {
+      const name = picoBayPids(psList()).includes(holder.pid) ? 'another pico-bay' : holder.command;
+      return name + ' (PID ' + holder.pid + ')';
+    }
+  } catch { /* lsof is missing or found nothing */ }
+  return 'another program';
+}
+
+// The process list as "pid args" lines; empty when it cannot be read.
+function psList() {
+  if (process.platform === 'win32') return '';
+  try {
+    return execFileSync('ps', ['-axo', 'pid=,args='], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000, maxBuffer: 8 * 1024 * 1024,
+    });
+  } catch { return ''; }
+}
+// The other pico-bay processes in a process list: node running pico-bay or pico-bay.js.
+function picoBayPids(text, selfPid = process.pid) {
+  const pids = [];
+  for (const line of String(text || '').split('\n')) {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!match || Number(match[1]) === selfPid) continue;
+    const argv = match[2];
+    if (/^(?:\S*\/)?node(?:\.exe)?\s/.test(argv) && /[/\s]pico-bay(?:\.js)?(?:\s|$)/.test(argv)) pids.push(Number(match[1]));
+  }
+  return pids;
+}
+// A startup warning when another pico-bay runs on this machine, or null.
+function otherPicoBayWarning(pids = picoBayPids(psList())) {
+  if (!pids.length) return null;
+  return 'Another pico-bay is running (PID ' + pids.join(', ') + '). A board can be used by only one at a time.';
 }
 
 // The same DTR/RTS sequences on Windows, sent to combridge over its control pipe.
@@ -352,6 +516,14 @@ class PicoPort {
     this.dev = dev;
     this.deviceIdentity = deviceIdentity(dev);
     this.fd = null;
+    this.wfd = null;        // second descriptor, for writes that never block (macOS, Linux)
+    this.writeTimeout = WRITE_TIMEOUT_MS;
+    this.opening = null;    // open in progress, shared by everyone who asks meanwhile
+    this.pendingOpen = null; // a system open that has not returned yet, even after its time limit
+    this.openTimeout = OPEN_TIMEOUT_MS;
+    this.openAborted = false;
+    this.exclusive = false; // the port is marked exclusive (see SERIAL_HELPER_PERL)
+    this.busyError = null;  // the last probe found another program using the port
     this.winPort = null;
     this.closing = false;
     this.connectionGeneration = 0;
@@ -377,11 +549,48 @@ class PicoPort {
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
   }
 
-  // Opens the device: through combridge on Windows (data on stdio, DTR/RTS over a named
-  // pipe), elsewhere as a raw tty set up with stty. Starts the reader.
+  // Opens the device once, however many callers ask while it is opening.
   async _open() {
     if (this.fd !== null || this.winPort !== null) return;
     if (this.closing) throw new Error('USB serial port is still closing. Reconnect the board, then Scan.');
+    if (!this.opening) {
+      this.openAborted = false;
+      this.opening = this._openNow().finally(() => { this.opening = null; });
+    }
+    await this.opening;
+  }
+
+  // Opens the tty for reading without blocking the process: a system open can wait a long
+  // time on a troubled port. After openTimeout the caller fails, and the open that is still
+  // running is kept (one per port) and closed, or reused by the next attempt, when it returns.
+  async _openDescriptor() {
+    if (!this.pendingOpen) {
+      const pending = { waiting: 0, promise: null };
+      pending.promise = new Promise((resolve, reject) => {
+        fs.open(this.dev, fs.constants.O_RDWR | fs.constants.O_NOCTTY, (error, fd) => error ? reject(error) : resolve(fd));
+      });
+      // Nobody is waiting any more when it returns late: close it.
+      pending.promise.then(fd => { this.pendingOpen = null; if (!pending.waiting) fs.close(fd, () => {}); },
+        () => { this.pendingOpen = null; });
+      this.pendingOpen = pending;
+    }
+    const pending = this.pendingOpen;
+    pending.waiting++;
+    let timer;
+    const late = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        pending.waiting--;
+        reject(new Error('USB serial port did not open in ' + Math.round(this.openTimeout / 1000) + ' s. Reconnect the board, then Scan.'));
+      }, this.openTimeout);
+    });
+    try { return await Promise.race([pending.promise, late]); }
+    finally { clearTimeout(timer); }
+  }
+
+  // Opens the device: through combridge on Windows (data on stdio, DTR/RTS over a named
+  // pipe), elsewhere as a raw tty set up with stty. Starts the reader.
+  async _openNow() {
+    let fd = null, wfd = null, opened = false;
     try {
       this.connectionGeneration++;
       if (process.platform === 'win32') {
@@ -428,14 +637,44 @@ class PicoPort {
         return;
       }
 
-      // macOS and Linux open the tty directly.
-      this.fd = fs.openSync(this.dev, fs.constants.O_RDWR | fs.constants.O_NOCTTY);
-      // Return reads after 100 ms instead of blocking indefinitely.
-      execFileSync('stty', [STTY_FLAG, this.dev, 'raw', '-echo', '115200', 'min', '0', 'time', '1'], {
-        stdio: ['ignore', 'ignore', 'ignore'],
+      // macOS and Linux open the tty directly. Nothing here may block the process: one
+      // slow port would stop every other board.
+      const gone = () => { if (this.openAborted) throw new Error('board disconnected while opening'); };
+      fd = await this._openDescriptor();
+      opened = true;
+      gone();
+      // A blocking write to a board that stopped reading would freeze the whole process.
+      // Writes go through this descriptor (see _writeAll); without it they use the blocking one.
+      wfd = await new Promise(resolve => {
+        fs.open(this.dev, fs.constants.O_WRONLY | fs.constants.O_NOCTTY | fs.constants.O_NONBLOCK, (error, descriptor) => resolve(error ? null : descriptor));
       });
+      gone();
+      // Return reads after 100 ms instead of blocking indefinitely.
+      await new Promise((resolve, reject) => {
+        execFile('stty', [STTY_FLAG, this.dev, 'raw', '-echo', '115200', 'min', '0', 'time', '1'],
+          { timeout: this.openTimeout }, error => error ? reject(error) : resolve());
+      });
+      gone();
+      // Best effort, and after stty, which opens the device itself: keep other programs
+      // (another pico-bay included) off the port while it is in use here.
+      const exclusive = (await runSerialHelper(fd, 'lock')).ok;
+      gone();
+      this.fd = fd;
+      this.wfd = wfd;
+      this.exclusive = exclusive;
     } catch (error) {
+      if (fd !== null) fs.close(fd, () => {});
+      if (wfd !== null) fs.close(wfd, () => {});
+      // Another program holds the port exclusively: the board is still there.
+      if (error.code === 'EBUSY' && !opened) {
+        const failure = new Error('Board is in use by ' + portHolder(this.dev) + '. Close its connection to this board and try again.');
+        failure.code = 'EBUSY';
+        failure.busy = true;
+        throw failure;
+      }
       this._disconnected();
+      // A port that is there but will not open says so; anything else is a missing board.
+      if (/did not open in/.test(error.message)) throw error;
       const failure = new Error('Board disconnected: ' + this.dev);
       failure.code = error.code || error.message;
       throw failure;
@@ -467,14 +706,25 @@ class PicoPort {
     this.connectionGeneration++;
     const fd = this.fd;
     this.fd = null;
+    if (this.wfd !== null) {
+      const wfd = this.wfd;
+      this.wfd = null;
+      fs.close(wfd, () => {});
+    }
     // A USB driver can wait indefinitely in close() after a native-USB ESP
     // resets. Detach immediately and keep that wait off the event loop.
     this.closing = true;
-    fs.close(fd, () => { this.closing = false; });
+    const close = () => fs.close(fd, () => { this.closing = false; });
+    // Clear the exclusive mark first, so a close that stalls cannot keep the port locked.
+    if (this.exclusive) {
+      this.exclusive = false;
+      runSerialHelper(fd, 'unlock', 1000).then(close, close);
+    } else close();
   }
 
   // Forgets everything learned about the board and fails any read in progress.
   _disconnected() {
+    if (this.opening) this.openAborted = true;
     const capture = this.capture;
     this.capture = null;
     this._close();
@@ -549,17 +799,29 @@ class PicoPort {
 
   // ── Primitives ──
 
-  // Handle short tty writes.
-  _writeAll(buf, off, len) {
+  // Handle short tty writes. A board that accepts no data for writeTimeout fails the write
+  // instead of blocking the process.
+  async _writeAll(buf, off, len) {
     if (this.winPort !== null) {
       return new Promise((resolve, reject) => {
         this.winPort.stdin.write(buf.subarray(off, off + len), error => error ? reject(error) : resolve());
       });
     }
+    const generation = this.connectionGeneration;
     let done = 0;
+    let stalledSince = 0;
     while (done < len) {
-      if (this.fd === null) throw new Error('port closed');
-      done += fs.writeSync(this.fd, buf, off + done, len - done);
+      if (this.fd === null || generation !== this.connectionGeneration) throw new Error('port closed');
+      if (this.wfd === null) { done += fs.writeSync(this.fd, buf, off + done, len - done); continue; }
+      let n = 0;
+      try { n = fs.writeSync(this.wfd, buf, off + done, len - done); }
+      catch (error) { if (error.code !== 'EAGAIN') throw error; }
+      if (n > 0) { done += n; stalledSince = 0; continue; }
+      if (!stalledSince) stalledSince = Date.now();
+      else if (Date.now() - stalledSince >= this.writeTimeout) {
+        throw new Error('timed out waiting for the board (it accepts no data); sent ' + done + ' of ' + len + ' bytes');
+      }
+      await sleep(5);
     }
   }
 
@@ -1212,9 +1474,15 @@ async function probe(dev) {
       return identify();
     }
   })();
-  try { return await p.probePromise; }
-  catch (error) {
-    p.probeFailure = { error, retryAt: oldFailure ? Infinity : Date.now() + 10000 };
+  try {
+    const info = await p.probePromise;
+    p.busyError = null;
+    return info;
+  } catch (error) {
+    // Remembered so the board keeps showing as busy while it is probed again.
+    p.busyError = error.busy ? error : null;
+    // A busy board is tried again soon: the other program may hold it only briefly.
+    p.probeFailure = { error, retryAt: error.busy ? Date.now() + 3000 : oldFailure ? Infinity : Date.now() + 10000 };
     throw error;
   }
   finally { p.probePromise = null; }
@@ -1276,6 +1544,13 @@ async function scanDevices({ waitForProbes = true } = {}) {
           !(port.probeFailure && Date.now() < port.probeFailure.retryAt)) {
         // Start/coalesce identification, but return the other boards immediately.
         if (Date.now() >= (port.rebootingUntil || 0)) void probe(dev).catch(() => {});
+        if (port.busyError) {
+          return {
+            dev, ok: false, error: String(port.busyError.message), busy: true,
+            machine: '', release: '', uid: '',
+            label: path.basename(dev).replace(/^cu\./, ''), serial: path.basename(dev).slice(-4),
+          };
+        }
         return {
           dev, ok: false, probing: true, label: path.basename(dev).replace(/^cu\./, ''),
           serial: '', error: 'Identifying board…',
@@ -1303,7 +1578,7 @@ async function scanDevices({ waitForProbes = true } = {}) {
         msg = 'Board is unresponsive (timed out).';
       }
       return {
-        dev, ok: false, error: msg,
+        dev, ok: false, error: msg, busy: !!e.busy,
         machine: '', release: '', uid: '',
         label: path.basename(dev).replace(/^cu\./, ''), serial: path.basename(dev).slice(-4),
       };
@@ -3452,7 +3727,7 @@ const MCP_TOOLS = [
     // The page's "Install ctrlPi API".
     name: 'pico_ctrlpi_install',
     title: 'Install the ctrlPi API on a board',
-    description: 'Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython (pico-gpio-api or esp32-gpio-api, downloaded from GitHub). Writes app.mpy, upgrader.mpy and main.py (plus boot.py on an ESP32), then config.json (the board\'s own kept, with this api_key and name), wifi.txt and scripts/cpu-temp.py when missing, and resets the board. It replaces main.py, so ask the user first and pass confirmed: true.',
+    description: 'Install or update the ctrlPi API agent on a Pico W, Pico 2 W or an ESP32 running MicroPython (pico-gpio-api or esp32-gpio-api, downloaded from GitHub; the ESP32 agent officially supports the ESP32, ESP32-S3 and ESP32-C3; other ESP32 chips are allowed but not officially supported). Writes app.mpy, upgrader.mpy and main.py (plus boot.py on an ESP32), then config.json (the board\'s own kept, with this api_key and name), wifi.txt and scripts/cpu-temp.py when missing, and resets the board. It replaces main.py, so ask the user first and pass confirmed: true.',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -3486,7 +3761,141 @@ const MCP_TOOLS = [
       });
     },
   },
+  {
+    // Opens the web UI, starting its server first under stdio MCP, or stops that server.
+    name: 'pico_ui',
+    title: 'Open or stop the pico-bay web UI',
+    description: 'Open the pico-bay web UI (files, console, backup, firmware install) in the browser, starting its web server when needed (action open, the default). When pico-bay runs on a Raspberry Pi or another remote machine it cannot open the user\'s browser: the result then has opened: false, and url is the address to open in a browser on the user\'s computer. Action stop stops a web server this tool started; the pico-bay app itself is never stopped.',
+    inputSchema: {
+      type: 'object', additionalProperties: false,
+      properties: { action: { type: 'string', enum: ['open', 'stop'], description: 'open (default) or stop.' } }
+    },
+    annotations: additiveAnnotations,
+    handler: async (raw, context) => {
+      const args = validateToolArgs(raw, ['action']);
+      const action = args.action === undefined ? 'open' : args.action;
+      if (action !== 'open' && action !== 'stop') throw new Error('action must be one of: open, stop');
+      return mcpToolResult(action === 'stop' ? await stopUi() : await openUi(context));
+    },
+  },
 ];
+
+// The web server behind pico_ui, as a promise of its port: the one startServer()
+// started, one started here on the first call under stdio MCP, or another pico-bay
+// already listening on the port.
+let uiServerReady = null;
+// The server ensureUiServer() itself started: the only one action stop may close.
+let uiOwnedServer = null;
+// Replaced in the tests.
+let browserOpener = url => openBrowser(url);
+
+// Whether a pico-bay answers on this port of the local machine.
+function picoBayOnPort(port) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/devices', timeout: 5000 }, res => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { if (body.length < 1e6) body += chunk; });
+      res.on('end', () => {
+        try { resolve(typeof JSON.parse(body).serverInstance === 'string'); }
+        catch { resolve(false); }
+      });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(false));
+  });
+}
+
+// Listens on `port`, or on one of the next `extra` ports when another program holds it.
+// Resolves {port} once listening, or {port, existing: true} when a busy port is answered
+// by this same app (it is used, not doubled); rejects with the listen error otherwise.
+async function listenOnFreePort(server, port, host, extra, sameApp) {
+  for (let candidate = port; ; candidate++) {
+    const error = await new Promise(resolve => {
+      server.once('error', resolve);
+      server.listen(candidate, host, () => { server.off('error', resolve); resolve(null); });
+    });
+    if (!error) return { port: server.address().port };
+    if (error.code !== 'EADDRINUSE') throw error;
+    if (await sameApp(candidate)) return { port: candidate, existing: true };
+    if (candidate >= port + extra) throw error;
+  }
+}
+
+// The tool returns the address, so a busy port moves to the next ones; a pico-bay
+// already there (usually the app itself) is used as it is.
+function ensureUiServer() {
+  if (uiServerReady) return uiServerReady;
+  const server = createServer({ mcpHttp: false });
+  const ready = listenOnFreePort(server, PORT, HOST, PORT_FALLBACKS, picoBayOnPort)
+    .then(({ port, existing }) => {
+      if (!existing) uiOwnedServer = server;
+      return { port };
+    }, error => {
+      throw new Error(error.code === 'EADDRINUSE'
+        ? 'Ports ' + PORT + ' to ' + (PORT + PORT_FALLBACKS) + ' are used by other programs. Start pico-bay with --port to choose another.'
+        : 'Could not start the web server: ' + String(error.message || error));
+    });
+  uiServerReady = ready;
+  // A failed start is tried again on the next call.
+  ready.catch(() => { if (uiServerReady === ready) uiServerReady = null; });
+  return ready;
+}
+
+// True for a Host header naming this machine itself.
+function loopbackHost(hostHeader) {
+  const name = String(hostHeader || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
+  return name === 'localhost' || name === '::1' || /^127\./.test(name);
+}
+
+// The address a client on another computer opens: the host it reached HTTP MCP at, the
+// address its ssh session came in on (stdio MCP over ssh), else the first LAN address.
+function remoteUiUrl(hostHeader, port, sshConnection, fallback) {
+  if (hostHeader) return 'http://' + hostHeader;
+  const address = String(sshConnection || '').split(' ')[2] || '';
+  if (net.isIP(address)) return 'http://' + (address.includes(':') ? '[' + address + ']' : address) + ':' + port;
+  return fallback;
+}
+
+// pico_ui action stop: closes the web server ensureUiServer() started, dropping the open
+// pages' connections. The app's own server and another running pico-bay are left alone.
+async function stopUi() {
+  if (uiServerReady) await uiServerReady.catch(() => {});
+  if (!uiServerReady) return { stopped: false, message: 'The web UI is not running.' };
+  if (!uiOwnedServer) return { stopped: false, message: 'The web UI was not started by this tool (it is the pico-bay app itself, or another running pico-bay), so it is left running.' };
+  const server = uiOwnedServer;
+  uiOwnedServer = null;
+  uiServerReady = null;
+  await new Promise(resolve => {
+    server.close(resolve);
+    server.closeAllConnections();
+  });
+  return { stopped: true };
+}
+
+// pico_ui action open: makes sure the UI is served, then opens it here, or returns the address
+// when the client is on another computer (a Raspberry Pi host, HTTP MCP reached by a
+// LAN address, stdio MCP over ssh) or the browser is disabled (--no-open).
+async function openUi(context = {}, options = {}) {
+  const { port } = await ensureUiServer();
+  const env = options.env || process.env;
+  const raspberryPi = options.raspberryPiHost === undefined ? RASPBERRY_PI_HOST : options.raspberryPiHost;
+  const remote = raspberryPi ||
+    (context.host ? !loopbackHost(context.host) : !!env.SSH_CONNECTION);
+  if (!remote && !(options.noOpen === undefined ? noOpen : options.noOpen)) {
+    const url = 'http://localhost:' + port;
+    browserOpener(url);
+    return { url, opened: true };
+  }
+  const local = 'http://localhost:' + port;
+  const url = remote
+    ? remoteUiUrl(context.host, port, env.SSH_CONNECTION, startupUrls(raspberryPi ? '0.0.0.0' : HOST, port)[0])
+    : local;
+  return {
+    url, opened: false,
+    message: 'The browser was not opened. Open this URL in a browser on the user\'s computer.',
+  };
+}
 
 // True when a request carries the current protocol revision in its _meta.
 function modernMcpRequest(msg) {
@@ -3506,7 +3915,8 @@ function completeMcpResult(result, modern) {
 
 // Handles one JSON-RPC message for either transport: server/discover, initialize,
 // ping, tools/list and tools/call. Returns the reply, or null for a notification.
-async function dispatchMcp(msg) {
+// `context.host` is the Host header of an HTTP MCP request (absent under stdio).
+async function dispatchMcp(msg, context = {}) {
   const id = msg && msg.id;
   const isRequest = id !== undefined && id !== null;
   const ok = result => ({ jsonrpc: '2.0', id, result });
@@ -3572,7 +3982,7 @@ async function dispatchMcp(msg) {
       let result;
       try {
         // A tool error becomes an isError result, not a protocol error.
-        result = await tool.handler(params.arguments || {});
+        result = await tool.handler(params.arguments || {}, context);
       } catch (error) {
         result = mcpToolResult({ error: String(error.message || error) }, true);
       }
@@ -3592,6 +4002,8 @@ function runMcpStdio() {
   // Anything logged goes to stderr instead.
   console.log = (...values) => console.error(...values);
   console.info = (...values) => console.error(...values);
+  const others = otherPicoBayWarning();
+  if (others) console.error(others);
   const rl = readline.createInterface({ input: process.stdin });
   const active = new Set();
   let writes = Promise.resolve();
@@ -3624,6 +4036,55 @@ function runMcpStdio() {
     await Promise.allSettled([...active]);
     await writes;
     shutdown();
+  });
+}
+
+// True when stdin is a pipe or a socket, which is how an MCP client (or ssh without a
+// terminal) starts a server. A terminal, /dev/null (a service, cron) and a file are not.
+function stdinIsPipe(fd = 0) {
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.isFIFO() || stat.isSocket()) return true;
+  } catch { /* fall through to the Windows check */ }
+  // Windows may not report a pipe as a FIFO; Node still opens it as a socket stream. A terminal
+  // is a socket stream too, so it is ruled out by isTTY.
+  return fd === 0 && process.platform === 'win32' && process.stdin instanceof net.Socket && !process.stdin.isTTY;
+}
+
+// Whether a line is a JSON-RPC 2.0 message, the first thing an MCP client sends.
+function isMcpLine(line) {
+  try {
+    const msg = JSON.parse(line);
+    return !!msg && msg.jsonrpc === '2.0' && typeof msg.method === 'string';
+  } catch { return false; }
+}
+
+// Started with no MCP flag on a piped stdin: resolves true when the first line is an MCP
+// message, false when it is anything else, stdin ends, or nothing arrives in time. The
+// bytes read go back into the stream, so runMcpStdio() sees them again.
+function detectMcpStdio(input = process.stdin, timeoutMs = 2000) {
+  return new Promise(resolve => {
+    const chunks = [];
+    const finish = () => {
+      clearTimeout(timer);
+      input.off('data', onData);
+      input.off('end', finish);
+      input.off('error', finish);
+      input.pause();
+      const seen = Buffer.concat(chunks);
+      const newline = seen.indexOf(10);
+      const mcp = newline >= 0 && isMcpLine(seen.subarray(0, newline).toString('utf8'));
+      if (mcp) input.unshift(seen);
+      resolve(mcp);
+    };
+    const onData = chunk => {
+      chunks.push(Buffer.from(chunk));
+      if (chunks[chunks.length - 1].includes(10)) finish();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    input.on('data', onData);
+    input.once('end', finish);
+    input.once('error', finish);
   });
 }
 
@@ -3704,7 +4165,7 @@ async function handleMcpHttp(req, res) {
   }
   if (toolCall) mcpHttpActive++;
   let response;
-  try { response = await dispatchMcp(msg); }
+  try { response = await dispatchMcp(msg, { host: req.headers.host }); }
   finally { if (toolCall) mcpHttpActive--; }
   if (!response) {
     res.writeHead(202);
@@ -3718,8 +4179,8 @@ async function handleMcpHttp(req, res) {
 
 // ── ctrlPi API install ──────────────────────────────────────────────────────────
 // "Install ctrlPi API" puts the agent on a board from the project's GitHub release
-// branch: pico-gpio-api on a Pico W / Pico 2 W, esp32-gpio-api on an ESP32, ESP32-S3 or
-// ESP32-C3. app.mpy is the precompiled agent, upgrader.mpy runs the agent's own /upgrade,
+// branch: pico-gpio-api on a Pico W / Pico 2 W, esp32-gpio-api on any ESP32 running
+// MicroPython. app.mpy is the precompiled agent, upgrader.mpy runs the agent's own /upgrade,
 // and main.py imports one of them (written last); the ESP32 also gets boot.py. Plus
 // config.json, wifi.txt and a sample sensor.
 
@@ -3746,12 +4207,14 @@ def read():
     return round((fahrenheit - 32) * 5 / 9, 1)
 `;
 
-// Which agent a board takes: 'pico' (Pico W, Pico 2 W), 'esp32' (an ESP32, ESP32-S3 or
-// ESP32-C3 running MicroPython; the S2 has no agent), or null.
+// Which agent a board running MicroPython takes: 'pico' (Pico W, Pico 2 W), 'esp32' (any ESP32),
+// or null. The agent officially supports the ESP32, ESP32-S3 and ESP32-C3; other ESP32 chips
+// (S2, C5, C6) are allowed but not officially supported.
 function ctrlpiBoardKind(info) {
+  if (info?.firmware !== 'micropython') return null;
   const machine = String(info?.machine || '').toLowerCase();
   if (/\bpico (?:2 )?w\b/.test(machine)) return 'pico';
-  if (info?.firmware === 'micropython' && /esp32/.test(machine) && !/esp32-?s2/.test(machine)) return 'esp32';
+  if (/esp32/.test(machine)) return 'esp32';
   return null;
 }
 
@@ -3776,7 +4239,7 @@ const CTRLPI_DEFAULT_KEY_WARNING = 'The agent uses the default API key your-secr
 async function installCtrlpi(dev, form, fetchAgent, options = {}) {
   await requireWritable(dev);
   const kind = ctrlpiBoardKind(await probe(dev));
-  if (!kind) throw httpError(400, 'Install ctrlPi API needs a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3 running MicroPython');
+  if (!kind) throw httpError(400, 'Install ctrlPi API needs a Pico W, Pico 2 W or an ESP32 running MicroPython');
   // What the board already has: its config is kept, its sensor script is not replaced.
   const existingPaths = new Set((await listFiles(dev, true)).map(f => String(f.path).replace(/^\//, '')));
   const existing = {
@@ -3804,17 +4267,16 @@ function ctrlpiInstallFiles(form, existing = {}, kind = 'pico', options = {}) {
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed;
     } catch { /* unreadable config: start a fresh one */ }
   }
-  // options.keepOmitted (pico_ctrlpi_install): a key or name left out keeps the board's own,
-  // and a missing key becomes the default.
+  // options.keepOmitted (pico_ctrlpi_install): a name left out keeps the board's own.
   const keep = options.keepOmitted;
-  // The form's fields; key and SSID are required, and none may contain a line break.
+  // The form's fields; the SSID is required, and none may contain a line break. A key left
+  // empty keeps the board's own, and becomes the default on a board without one.
   let key = String(form?.key ?? '').trim();
-  if (!key && keep) key = String(config.api_key ?? '').trim() || CTRLPI_DEFAULT_KEY;
+  if (!key) key = String(config.api_key ?? '').trim() || CTRLPI_DEFAULT_KEY;
   const keepName = keep && form?.name === undefined && typeof config.name === 'string';
   const name = keepName ? config.name.trim() : String(form?.name ?? '').trim();
   const ssid = String(form?.ssid ?? '');
   const pass = String(form?.pass ?? '');
-  if (!key) throw httpError(400, 'API key is required');
   if (!ssid) throw httpError(400, 'WiFi SSID is required');
   for (const [label, value] of [['API key', key], ['Agent name', name], ['WiFi SSID', ssid], ['WiFi password', pass]]) {
     if (/[\r\n]/.test(value)) throw httpError(400, label + ' cannot contain a line break');
@@ -4376,18 +4838,22 @@ function findPortOwner(port) {
 }
 
 // Startup message for a busy port: who holds it, how to stop it, or another port to use.
-function portInUseLines(host, port, owner) {
-  const lines = ['Port is already in use: ' + host + ':' + port];
+// `extra` is how many ports after it were tried as well.
+function portInUseLines(host, port, owner, extra = 0) {
+  const lines = [extra
+    ? 'Ports ' + port + ' to ' + (port + extra) + ' are already in use: ' + host
+    : 'Port is already in use: ' + host + ':' + port];
+  const next = port + extra + 1;
   if (owner) {
-    lines.push('Used by: ' + owner.command + ' (PID ' + owner.pid + ')');
+    lines.push((extra ? 'Port ' + port + ' is used by: ' : 'Used by: ') + owner.command + ' (PID ' + owner.pid + ')');
     lines.push('Stop it: ' + (process.platform === 'win32'
       ? 'taskkill /PID ' + owner.pid + ' /F'
       : 'kill ' + owner.pid));
   } else if (process.platform !== 'win32') {
     lines.push('Find the process: lsof -nP -iTCP:' + port + ' -sTCP:LISTEN');
   }
-  lines.push('Or choose another port: pico-bay --port ' + (port + 1));
-  lines.push('From this source folder: npm start -- --port ' + (port + 1));
+  lines.push('Or choose another port: pico-bay --port ' + next);
+  lines.push('From this source folder: npm start -- --port ' + next);
   return lines;
 }
 
@@ -4412,41 +4878,55 @@ function startupUrls(host, port, interfaces = os.networkInterfaces()) {
 }
 
 // Starts the web server, prints where it listens, scans once for boards, and opens the
-// browser unless that is disabled.
+// browser unless that is disabled. A pico-bay already on the port is opened instead of
+// starting a second one; with options.portFallback a port held by another program moves
+// to one of the next PORT_FALLBACKS ports.
 function startServer(options = {}) {
   const server = createServer(options);
-  server.once('error', (error) => {
+  const extra = options.portFallback ? PORT_FALLBACKS : 0;
+  const failed = error => {
     if (error.code === 'EADDRINUSE') {
       const owner = findPortOwner(PORT);
-      console.error('\n' + portInUseLines(HOST, PORT, owner).join('\n') + '\n');
+      console.error('\n' + portInUseLines(HOST, PORT, owner, extra).join('\n') + '\n');
       process.exitCode = 1;
       return;
     }
     console.error('Could not start pico-bay: ' + String(error.message || error));
     process.exitCode = 1;
-  });
-  server.listen(PORT, HOST, () => {
-  // Print every address the UI can be opened at.
-  const actualPort = server.address().port;
-  const localAddr = 'http://localhost:' + actualPort;
-  const addresses = startupUrls(HOST, actualPort);
-  const bar = '-'.repeat(Math.max(...addresses.map(address => address.length)));
-  console.log('pico-bay started on → ');
-  console.log(bar);
-  for (const address of addresses) console.log(address);
-  console.log(bar);
-  if (options.mcpHttp) console.log('MCP endpoint: ' + addresses[0] + '/mcp');
-  if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
-    console.log('listening on ' + HOST + '; ensure this interface is trusted');
-  }
-  // Log the boards present at startup.
-  scanDevices().then(logDeviceChanges).catch(e => {
-    console.log('device scan failed: ' + String(e.message || e));
-  });
-  if (shouldOpenBrowser(noOpen, RASPBERRY_PI_HOST)) {
-    openBrowser(localAddr);
-  }
-  });
+  };
+  listenOnFreePort(server, PORT, HOST, extra, picoBayOnPort).then(({ port, existing }) => {
+    if (existing) {
+      const running = 'http://localhost:' + port;
+      console.log('pico-bay is already running: ' + running);
+      if (shouldOpenBrowser(noOpen, RASPBERRY_PI_HOST)) openBrowser(running);
+      else process.exitCode = 1;
+      return;
+    }
+    // Print every address the UI can be opened at.
+    const actualPort = port;
+    if (PORT && actualPort !== PORT) console.log('Port ' + PORT + ' is in use, using ' + actualPort);
+    uiServerReady = Promise.resolve({ port: actualPort });
+    const localAddr = 'http://localhost:' + actualPort;
+    const addresses = startupUrls(HOST, actualPort);
+    const bar = '-'.repeat(Math.max(...addresses.map(address => address.length)));
+    console.log('pico-bay started on → ');
+    console.log(bar);
+    for (const address of addresses) console.log(address);
+    console.log(bar);
+    if (options.mcpHttp) console.log('MCP endpoint: ' + addresses[0] + '/mcp');
+    if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
+      console.log('listening on ' + HOST + '; ensure this interface is trusted');
+    }
+    const others = otherPicoBayWarning();
+    if (others) console.log(others);
+    // Log the boards present at startup.
+    scanDevices().then(logDeviceChanges).catch(e => {
+      console.log('device scan failed: ' + String(e.message || e));
+    });
+    if (shouldOpenBrowser(noOpen, RASPBERRY_PI_HOST)) {
+      openBrowser(localAddr);
+    }
+  }, failed);
   return server;
 }
 
@@ -4459,13 +4939,14 @@ function shutdown() {
     if (port.fd === null) continue;
     try {
       // Ctrl-C, leave the raw REPL, soft reset: the board's own program starts again.
-      fs.writeSync(port.fd, Buffer.from('\r' + CTRL_C + CTRL_B + CTRL_D, 'binary'));
+      fs.writeSync(port.wfd !== null ? port.wfd : port.fd, Buffer.from('\r' + CTRL_C + CTRL_B + CTRL_D, 'binary'));
       port._close();
     } catch { /* Board disconnected or unresponsive during shutdown. */ }
   }
   process.exit(0);
 }
-// Run as a program: one MCP transport at most, then stdio MCP or the web server.
+// Run as a program: one MCP transport at most, then stdio MCP or the web server. With no
+// MCP choice made, an MCP client talking on stdin gets stdio MCP.
 if (require.main === module) {
   if (conflictingMcpFlags) {
     console.error('Do not combine --no-mcp with --mcp-stdio or --mcp-http');
@@ -4475,8 +4956,10 @@ if (require.main === module) {
     process.exitCode = 1;
   } else if (mcpStdio) {
     runMcpStdio();
+  } else if (mcpAutodetect && stdinIsPipe()) {
+    detectMcpStdio().then(mcp => (mcp ? runMcpStdio() : startServer({ mcpHttp, portFallback })));
   } else {
-    startServer({ mcpHttp });
+    startServer({ mcpHttp, portFallback });
   }
   // Ctrl-C or a service stop resets the boards before exiting.
   process.on('SIGINT', shutdown);
@@ -4543,6 +5026,16 @@ module.exports = {
   enterBootloader,
   rebootEspAfterInstall,
   selectMcpTransports,
+  stdinIsPipe,
+  isMcpLine,
+  detectMcpStdio,
+  parseLsofHolders,
+  picoBayPids,
+  otherPicoBayWarning,
+  listenOnFreePort,
+  openUi,
+  stopUi,
+  remoteUiUrl,
   shouldOpenBrowser,
   startupUrls,
   simpleOp,
@@ -4565,6 +5058,11 @@ module.exports = {
       espInstallOverride = null;
       ctrlpiAgentOverride = null;
     },
+    // Which helper runs: 0 Perl, 1 Python, 2 none.
+    setSerialHelper(index) { serialHelper = index; },
+    getSerialHelper() { return serialHelper; },
+    setBrowserOpener(handler) { browserOpener = handler || (url => openBrowser(url)); },
+    setUiServerPort(port) { uiServerReady = port === null ? null : Promise.resolve({ port }); },
     setBootselDevices(entries) { bootselDeviceOverride = entries; },
     setBootselInstaller(handler) { bootselInstallOverride = handler; },
     setEspInstaller(handler) { espInstallOverride = handler; },

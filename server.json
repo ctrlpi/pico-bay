@@ -6,12 +6,12 @@
     "url": "https://github.com/ctrlpi/pico-bay",
     "source": "github"
   },
-  "version": "0.9.34",
+  "version": "0.9.40",
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@ctrlpi/pico-bay",
-      "version": "0.9.34",
+      "identifier": "pico-bay",
+      "version": "0.9.40",
       "transport": {
         "type": "stdio"
       },

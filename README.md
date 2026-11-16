@@ -1,10 +1,10 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.34](https://img.shields.io/badge/version-0.9.34-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.40](https://img.shields.io/badge/version-0.9.40-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
-[![Tools: 13](https://img.shields.io/badge/tools-13-006400.svg)](#mcp-tools)
+[![Tools: 14](https://img.shields.io/badge/tools-14-006400.svg)](#mcp-tools)
 [![License: MIT](https://img.shields.io/badge/license-MIT-188038.svg)](https://github.com/ctrlpi/pico-bay/blob/main/LICENSE)
 ![Status: Beta](https://img.shields.io/badge/status-Beta-red.svg)
 [![Build Status](https://github.com/ctrlpi/pico-bay/actions/workflows/ci.yml/badge.svg)](https://github.com/ctrlpi/pico-bay/actions)
@@ -16,7 +16,7 @@
 Requires Node.js 20 or newer.
 
 ```sh
-npx @ctrlpi/pico-bay
+npx pico-bay
 ```
 
 Your browser will open automatically! If it doesn't, head to [http://localhost:7426](http://localhost:7426). On a Raspberry Pi, open `http://PI_HOST_ADDR:7426` from another device on the same network, replacing `PI_HOST_ADDR` with the Pi's IP address or hostname.
@@ -55,14 +55,14 @@ pico-bay includes a dependency-free [Model Context Protocol](https://modelcontex
 
 ### Agent configuration
 
-In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers` enabling stdio:
+In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers`. `--mcp-stdio` is optional here: pico-bay detects an MCP client on stdin and starts stdio on its own.
 
 ```json
 {
   "mcpServers": {
     "pico-bay": {
       "command": "npx",
-      "args": ["-y", "@ctrlpi/pico-bay", "--mcp-stdio"]
+      "args": ["-y", "pico-bay", "--mcp-stdio"]
     }
   }
 }
@@ -75,7 +75,7 @@ Cursor takes the same JSON, here and under Streamable HTTP. Put it in `~/.cursor
 Use HTTP when the MCP client runs on another computer or Raspberry Pi:
 
 ```sh
-npx @ctrlpi/pico-bay --mcp-http
+npx pico-bay --mcp-http
 ```
 
 The normal web interface remains available and MCP is served at `http://HOST:7426/mcp`. Configure the MCP agent to connect over HTTP, replacing `PI_HOST_ADDR` with the platform running pico-bay:
@@ -113,6 +113,7 @@ The server supports MCP revision `2026-07-28` and the legacy initialize flow thr
 | `pico_board_reset` | Soft-reset a board or request a supported hard reset. |
 | `pico_board_bootloader` | Put a board into BOOTSEL or ESP32 download mode for `pico_install`. |
 | `pico_ctrlpi_install` | Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3. |
+| `pico_ui` | Open the web UI in the browser, or return its address when pico-bay runs on another computer. `action: "stop"` stops it. |
 | `pico_install` | Check and install MicroPython on a Pico in BOOTSEL mode or a supported ESP32 in DOWNLOAD mode. |
 
 Call `pico_boards_list` first, then pass its `board_id` to board-specific tools. ZIP backup/restore, live console streaming, and **Delete all files** are intentionally not exposed through MCP.
@@ -126,9 +127,9 @@ On a board running MicroPython, **Install ctrlPi API** in the top-right menu tur
 | Pico W, Pico 2 W | [`pico-gpio-api`](https://github.com/ctrlpi/pico-gpio-api) | `app.mpy`, `upgrader.mpy`, `main.py` |
 | ESP32, ESP32-S3, ESP32-C3 | [`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api) | `app.mpy`, `boot.py`, `upgrader.mpy`, `main.py` |
 
-`app.mpy` is the agent, precompiled, `upgrader.mpy` runs its over-the-air `/upgrade`, and `main.py` loads one of them. Fill in the API key, an optional agent name, and the WiFi SSID and password; pico-bay downloads the latest files, checks them, writes them (`main.py` last) together with `config.json`, `wifi.txt` and a sample `scripts/cpu-temp.py` sensor for that board, and resets it. The menu item is not shown on other boards (a Pico without WiFi, an ESP32-S2, or CircuitPython).
+`app.mpy` is the agent, precompiled, `upgrader.mpy` runs its over-the-air `/upgrade`, and `main.py` loads one of them. Fill in the WiFi SSID and password, and optionally an API key and an agent name; pico-bay downloads the latest files, checks them, writes them (`main.py` last) together with `config.json`, `wifi.txt` and a sample `scripts/cpu-temp.py` sensor for that board, and resets it. The menu item is greyed out on other boards (a Pico without WiFi, or CircuitPython).
 
-On a board that already runs the agent, the form is filled in from its current files, and its existing settings (pins, sensors, bridges) are kept: only the key and name are replaced, and an existing `cpu-temp.py` is left alone. A blank name keeps the agent's own default, `pico-<serial4>` or `esp32-<serial4>`.
+On a board that already runs the agent, the form is filled in from its current files, and its existing settings (pins, sensors, bridges) are kept: only the key and name are replaced, and an existing `cpu-temp.py` is left alone. A blank name keeps the agent's own default, `pico-<serial4>` or `esp32-<serial4>`. A blank API key keeps the board's own key, or uses the default `your-secret-key` on a board without one: that key is public, so change it before relying on the agent.
 
 ## Installing MicroPython in BOOTSEL mode
 
@@ -150,7 +151,7 @@ Select **Install MicroPython** to download, validate, install, and verify the la
 - Permission to open the board's serial device.
 - On Windows, the .NET Framework v4 C# compiler (`csc.exe`) is required to build the serial helper automatically at startup.
 - For ESP32 on Windows, the appropriate serial driver installed (see [Troubleshooting](#no-board-appears)).
-- For ESP32 resets and download mode on macOS and Linux, Python 3 (standard library only), which drives the DTR and RTS lines.
+- For ESP32 resets and download mode on macOS and Linux, Perl or Python 3 (standard library only), which drives the DTR and RTS lines.
 
 ## Install
 
@@ -165,7 +166,7 @@ npm start
 Or install the npm package locally:
 
 ```bash
-npm install @ctrlpi/pico-bay
+npm install pico-bay
 npx pico-bay
 ```
 
@@ -189,7 +190,7 @@ pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS
       <td width="20%"><code>--port</code></td>
       <td width="20%"><code>PICO_PORT</code></td>
       <td width="13%"><code>7426</code></td>
-      <td width="47%">Web server port.</td>
+      <td width="47%">Web server port. When the default is busy on a desktop, one of the next 3 is used.</td>
     </tr>
     <tr>
       <td width="20%"><code>--host</code></td>
@@ -219,7 +220,7 @@ pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS
       <td width="20%"><code>--mcp-stdio</code></td>
       <td width="20%"><code>PICO_MCP_STDIO</code></td>
       <td width="13%"><code>false</code></td>
-      <td width="47%">Run only the MCP stdio transport. No web server or browser is started.</td>
+      <td width="47%">Run only the MCP stdio transport. Optional when an MCP client starts pico-bay: it is detected automatically.</td>
     </tr>
     <tr>
       <td width="20%"><code>--mcp-http</code></td>

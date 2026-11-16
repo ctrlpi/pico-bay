@@ -61,7 +61,7 @@
   .pill.micropython .pico-icon { color: #0969da; }
   .pill.circuitpython { border-color: rgba(188,76,0,0.45); }
   .pill.circuitpython .pico-icon { color: #bc4c00; }
-  .pill.bootsel { color: #cf222e; background: #ffebe9; border-color: rgba(207,34,46,0.5); }
+  .pill.bootsel, .pill.busy { color: #cf222e; background: #ffebe9; border-color: rgba(207,34,46,0.5); }
   .pill.bad { color: #cf222e; border-color: rgba(207,34,46,0.4); }
   /* The serial or mode label and the RO marker inside a pill. */
   .pill .serial { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -164,6 +164,9 @@
   #menu button[hidden] { display: none; }
   #menu button.danger, .dropdown-menu button.danger { color: #cf222e; }
   #menu button.danger:hover, .dropdown-menu button.danger:hover { background: #ffebe9; }
+  /* A disabled item is grey whatever its own colour (red Delete all, blue Install ctrlPi API). */
+  #menu button.danger:disabled, #menu #ctrlpi-install-btn:disabled { color: #8c959f !important; }
+  #menu button.danger:disabled:hover { background: none; }
   #menu button.menu-toggle { display: flex; align-items: center; justify-content: space-between; }
   #menu .menu-label-detail { font-size: 10px; color: #57606a; }
   #menu .menu-checkmark { color: #0969da; flex: 0 0 auto; transition: opacity 120ms ease; }
@@ -605,7 +608,8 @@
     border-color: rgba(240,136,62,0.45);
   }
   body.dark-mode .pill.circuitpython .pico-icon, html.dark-mode .pill.circuitpython .pico-icon { color: #f0883e; }
-  body.dark-mode .pill.bootsel, html.dark-mode .pill.bootsel {
+  body.dark-mode .pill.bootsel, html.dark-mode .pill.bootsel,
+  body.dark-mode .pill.busy, html.dark-mode .pill.busy {
     color: #f85149;
     background: rgba(248,81,73,0.15);
     border-color: rgba(248,81,73,0.5);
@@ -757,6 +761,13 @@
   }
   body.dark-mode #ctrlpi-install-btn, html.dark-mode #ctrlpi-install-btn {
     color: #58a6ff !important;
+  }
+  body.dark-mode #menu button.danger:disabled, html.dark-mode #menu button.danger:disabled,
+  body.dark-mode #menu #ctrlpi-install-btn:disabled, html.dark-mode #menu #ctrlpi-install-btn:disabled {
+    color: #6e7681 !important;
+  }
+  body.dark-mode #menu button.danger:disabled:hover, html.dark-mode #menu button.danger:disabled:hover {
+    background: none;
   }
 
   /* Dialogs. */
@@ -1078,7 +1089,7 @@
       <button class="requires-write" onclick="newFile()">New file…</button>
       <button class="requires-write" onclick="newFolder()">New folder…</button>
       <hr>
-      <!-- Upload, and Install ctrlPi API (shown on a Pico W / Pico 2 W, ESP32, ESP32-S3 or ESP32-C3). -->
+      <!-- Upload, and Install ctrlPi API (enabled on a Pico W / Pico 2 W and any ESP32 running MicroPython). -->
       <button class="requires-write" onclick="pickUpload()">Upload files…</button>
       <button class="requires-write" onclick="pickUploadFolder()">Upload folder…</button>
       <button class="requires-write" id="ctrlpi-install-btn" style="color: #0969da; display: none;" onclick="openCtrlPiDialog()">Install ctrlPi API</button>
@@ -1116,7 +1127,8 @@
       <hr>
       <!-- Help and about. -->
       <button onclick="showReadme()">README.md</button>
-      <a href="https://pico-bay.ctrlpi.com/pinout/pico"
+      <!-- The pinout of the selected board: setEnabled() makes it the ESP32 one for an ESP32. -->
+      <a id="pinout-link" href="https://pico-bay.ctrlpi.com/pinout/pico"
         target="_blank" rel="noopener noreferrer">Pico Pinout ↗</a>
       <button onclick="showAbout()">About Pico Bay…</button>
     </div>
@@ -1286,9 +1298,10 @@
   <form id="ctrlpi-form" style="padding: 20px;">
     <h2 style="font-size: 16px; margin-bottom: 8px;">Install ctrlPi API</h2>
     <div style="color: #57606a; font-size: 13px; margin-bottom: 16px;">Fill in the details below to install ctrlPi API on this board.</div>
+    <div id="ctrlpi-unofficial" hidden style="color: #9a6700; font-size: 13px; margin: -8px 0 16px;">This chip is not officially supported by the ctrlPi API: the agent may not work on it.</div>
     <div class="ctrlpi-field">
       <label>API Key</label>
-      <input id="ctrlpi-key" autocomplete="off" required>
+      <input id="ctrlpi-key" autocomplete="off" placeholder="your-secret-key">
     </div>
     <div class="ctrlpi-field">
       <label>Agent Name (optional)</label>
@@ -1739,10 +1752,10 @@
       ].filter(Boolean).join(' · ') : d.error;
       var firmwareClass = d.bootMode ? ' bootsel' : d.firmware === 'circuitpython' ? ' circuitpython' :
         d.firmware === 'micropython' ? ' micropython' : '';
-      return '<button class="pill' + firmwareClass + (d.dev === curDev ? ' active' : '') + (d.ok ? '' : ' bad') +
+      return '<button class="pill' + firmwareClass + (d.dev === curDev ? ' active' : '') + (d.ok ? '' : ' bad') + (d.busy ? ' busy' : '') +
         '" data-dev="' + esc(d.dev) + '" title="' + esc(details) + '">' +
         picoIcon + esc(d.label) +
-        (d.bootMode ? '<span class="serial">' + (d.bootloader === 'esp-rom' ? 'DOWNLOAD' : 'BOOTSEL') + '</span>' : '<span class="serial">' + (d.probing ? 'Scanning…' : esc(d.serial)) + '</span>') +
+        (d.bootMode ? '<span class="serial">' + (d.bootloader === 'esp-rom' ? 'DOWNLOAD' : 'BOOTSEL') + '</span>' : '<span class="serial">' + (d.probing ? 'Scanning…' : d.busy ? 'BUSY' : esc(d.serial)) + '</span>') +
         (d.readOnly && !d.bootMode ? '<span class="readonly">RO</span>' : '') + '</button>';
     }).join('');
   }
@@ -1893,16 +1906,34 @@
     conIn.disabled = !on || !canUseConsole();
     conIn.placeholder = canUseConsole() ? 'Run a Python line on the board…' : 'Console input unavailable';
 
-    // "Install ctrlPi API" is offered on a Pico W / Pico 2 W, and on an ESP32, ESP32-S3 or
-    // ESP32-C3 running MicroPython (the same boards the server accepts).
+    // "Install ctrlPi API" is offered on a Pico W / Pico 2 W and on any ESP32 running MicroPython
+    // (the same boards the server accepts). On any other board (a Pico without WiFi, any board
+    // running CircuitPython) it is shown greyed out. The agent officially supports the ESP32,
+    // ESP32-S3 and ESP32-C3: another ESP32 chip (S2, C5, C6) is offered with a note.
     var ctrlPiBtn = document.getElementById('ctrlpi-install-btn');
     if (ctrlPiBtn) {
       var machine = device && device.machine ? device.machine.toLowerCase() : '';
-      var ctrlPiKind = /\bpico (?:2 )?w\b/.test(machine) ? 'pico'
-        : device && device.firmware === 'micropython' && /esp32/.test(machine) && !/esp32-?s2/.test(machine) ? 'esp32' : '';
+      var circuitPython = !!device && device.firmware === 'circuitpython';
+      var ctrlPiKind = circuitPython ? ''
+        : /\bpico (?:2 )?w\b/.test(machine) ? 'pico'
+        : device && device.firmware === 'micropython' && /esp32/.test(machine) ? 'esp32' : '';
+      var ctrlPiUnofficial = ctrlPiKind === 'esp32' && /esp32-?[a-z]\d/.test(machine) && !/esp32-?(?:s3|c3)/.test(machine);
       ctrlPiBtn.dataset.kind = ctrlPiKind;
-      ctrlPiBtn.style.display = (on && ctrlPiKind) ? 'block' : 'none';
+      ctrlPiBtn.dataset.unofficial = ctrlPiUnofficial ? '1' : '';
+      ctrlPiBtn.style.display = on ? 'block' : 'none';
+      if (!ctrlPiKind) ctrlPiBtn.disabled = true;
+      ctrlPiBtn.title = ctrlPiUnofficial ? 'This chip is not officially supported by the ctrlPi API'
+        : ctrlPiKind ? '' : circuitPython ? 'The ctrlPi API needs MicroPython'
+        : 'The ctrlPi API needs a board with WiFi';
     }
+
+    // The pinout link follows the selected board: the ESP32 pinout for an ESP32 (running or
+    // in download mode), the Pico pinout for any other board and with none selected.
+    var pinoutLink = document.getElementById('pinout-link');
+    var espBoard = !!device && (device.bootloader === 'esp-rom' ||
+      /ESP32|Espressif/i.test((device.machine || '') + ' ' + (device.label || '')));
+    pinoutLink.textContent = espBoard ? 'ESP32 Pinout ↗' : 'Pico Pinout ↗';
+    pinoutLink.href = 'https://pico-bay.ctrlpi.com/pinout/' + (espBoard ? 'esp32' : 'pico');
   }
 
   // Selects a board: install-mode devices get their install screen, running boards
@@ -1928,11 +1959,16 @@
       mainEl.classList.add('bootsel-mode');
       listEl.innerHTML = '';
       storageEl.classList.remove('visible');
-      phTitle.textContent = selectedDevice.probing ? 'Identifying board…' : 'Board identification failed';
+      phTitle.textContent = selectedDevice.probing ? 'Identifying board…' :
+        selectedDevice.busy ? 'Board is in use' : 'Board identification failed';
       phSub.textContent = selectedDevice.probing
         ? 'Checking ' + selectedDevice.dev + '. Other connected boards remain available.'
         : selectedDevice.error;
-      if (!selectedDevice.probing) {
+      // A board another program is using only needs that program to let go.
+      if (selectedDevice.busy) {
+        bootselOptionsEl.classList.add('visible', 'mount-help');
+        bootselOptionsEl.innerHTML = '<div class="board-choices"><button class="btn" data-rescan>Rescan</button></div>';
+      } else if (!selectedDevice.probing) {
         var isDownloadCandidate = (selectedDevice.error &&
           /watchdog resets|download bootloader|ESP/i.test(selectedDevice.error)) ||
           /ESP32/i.test(selectedDevice.machine || selectedDevice.label || '');
@@ -3801,8 +3837,9 @@
     
     // Defaults, replaced by the board's own config.json and wifi.txt when present.
     var kind = document.getElementById('ctrlpi-install-btn').dataset.kind || 'pico';
+    document.getElementById('ctrlpi-unofficial').hidden = !document.getElementById('ctrlpi-install-btn').dataset.unofficial;
     nameInput.placeholder = 'Defaults to ' + kind + '-<serial4>';
-    keyInput.value = 'your-secret-key';
+    keyInput.value = '';   // left empty: the board's own key, else the default shown in grey
     nameInput.value = '';
     ssidInput.value = '';
     passInput.value = '';
@@ -3813,7 +3850,7 @@
         var configData = await api('/api/file?path=config.json');
         if (configData && configData.text) {
           var conf = JSON.parse(configData.text);
-          if (conf.api_key) keyInput.value = conf.api_key;
+          if (conf.api_key && conf.api_key !== 'your-secret-key') keyInput.value = conf.api_key;
           if (conf.name) nameInput.value = conf.name;
         }
       } catch (e) {}
@@ -3855,12 +3892,16 @@
     toast('Installing ctrlPi API on the board...', false, 15000);
     
     try {
-      await api('/api/ctrlpi/install', {
+      var result = await api('/api/ctrlpi/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: key, name: name, ssid: ssid, pass: pass })
       });
-      toast('ctrlPi API installed successfully. Board is resetting.', false, 3000, true);
+      if (result && result.defaultKey) {
+        toast('ctrlPi API installed. Board is resetting. It uses the default API key your-secret-key, which is public: anyone on the network can control it, and /script/write is refused until the key is changed.', false, 12000, true);
+      } else {
+        toast('ctrlPi API installed successfully. Board is resetting.', false, 3000, true);
+      }
       loadFiles();
     } catch (e) {
       toast('Installation failed: ' + e.message, true);
