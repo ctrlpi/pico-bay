@@ -529,6 +529,7 @@ class PicoPort {
     this.connectionGeneration = 0;
     this.chain = Promise.resolve();
     this.rx = '';           // bytes received during a command, not yet consumed
+    this.recentOutput = ''; // the last bytes received, command or not (see _onData)
     this.inCommand = false;
     this.capture = null;    // in-flight readUntil, if any
     this.monitors = new Set();
@@ -765,6 +766,9 @@ class PicoPort {
 
   // Bytes go to the running command, or to console subscribers when idle.
   _onData(chunk) {
+    // The last bytes received, kept after a disconnect: a board that resets before its
+    // probe ends still shows what it printed (an ESP's "invalid header", for one).
+    this.recentOutput = (this.recentOutput + chunk).slice(-1024);
     if (this.inCommand) { this.rx += chunk; this._check(); return; }
     this._emit('out', chunk);
   }
@@ -882,7 +886,11 @@ class PicoPort {
         // Start reading after a successful write to avoid orphaned timeout promises.
         await this.readUntil(RAW_BANNER, 1500);
         return;
-      } catch (e) { lastErr = e; }
+      } catch (e) {
+        // A board that vanished cannot answer: retrying would spin until the deadline.
+        if (/^port closed$|^Board disconnected/.test(String(e.message))) throw e;
+        lastErr = e;
+      }
     } while (Date.now() < deadline);
     throw lastErr || new Error('could not enter the raw REPL');
   }
@@ -1059,6 +1067,10 @@ class PicoPort {
 // ── Device registry ─────────────────────────────────────────────────────────
 const ports = new Map(); // dev path -> PicoPort
 const espInstalls = new Set(); // serial paths with an active firmware installation
+// Failed probes in a row per device path, {count, error, missingSince}. Kept by path because
+// a board that resets in a loop drops off USB and comes back as a new PicoPort each time.
+const probeStrikes = new Map();
+const PROBE_STRIKE_LIMIT = 3;
 let deviceListOverride = null; // test seam; null always in normal CLI use
 
 // What each firmware supports and how to hard-reset it. CircuitPython counts as
@@ -1266,7 +1278,7 @@ async function detectEspBootloader(port) {
       details.securityChecked = true;
       if (data.length === 20) {
         details.chipId = data.readUInt32LE(12);
-        chip = ({ 5: 'ESP32-C3', 9: 'ESP32-S3' })[details.chipId] || null;
+        chip = ({ 5: 'ESP32-C3', 9: 'ESP32-S3', 13: 'ESP32-C6' })[details.chipId] || null;
       }
     }
   } catch { /* Older ROMs do not implement GET_SECURITY_INFO. */ }
@@ -1346,6 +1358,8 @@ async function probeRecord(port, key, code, attempts = 4) {
         return found;
       }, { rawRepl: false }).catch(() => null);
       if (boot) { port.info = boot; return 'esp-bootloader'; }
+      // Also what the board printed before its port closed (see _onData).
+      text += '\n' + port.recentOutput;
       if (/invalid header:\s*0x[fF]{8}/i.test(text)) {
         throw new Error('ESP reports an invalid flash header and is not in download mode. ' +
           'Hold BOOT, press and release RESET/EN, keep holding BOOT for 3 seconds, then release and Scan. ' +
@@ -1407,9 +1421,13 @@ async function probe(dev) {
   if (Date.now() < (p.rebootingUntil || 0)) await sleep(p.rebootingUntil - Date.now());
   if (p.info) return p.info;
   if (p.probePromise) return p.probePromise;
+  // After PROBE_STRIKE_LIMIT failures in a row the path is left alone until Scan.
+  const strikes = probeStrikes.get(dev);
+  if (strikes && strikes.count >= PROBE_STRIKE_LIMIT) throw strikes.error;
   if (p.probeFailure && Date.now() < p.probeFailure.retryAt) throw p.probeFailure.error;
   const oldFailure = p.probeFailure;
   p.probeFailure = null;
+  p.recentOutput = '';
   // Firmware first (or ESP download mode), then its details. CircuitPython reports
   // each value in its own command; MicroPython all at once.
   const identify = async () => {
@@ -1477,15 +1495,29 @@ async function probe(dev) {
   try {
     const info = await p.probePromise;
     p.busyError = null;
+    probeStrikes.delete(dev);
     return info;
   } catch (error) {
     // Remembered so the board keeps showing as busy while it is probed again.
     p.busyError = error.busy ? error : null;
     // A busy board is tried again soon: the other program may hold it only briefly.
     p.probeFailure = { error, retryAt: error.busy ? Date.now() + 3000 : oldFailure ? Infinity : Date.now() + 10000 };
-    throw error;
+    if (error.busy) throw error;
+    const count = (probeStrikes.get(dev)?.count || 0) + 1;
+    const reported = count >= PROBE_STRIKE_LIMIT ? stoppedProbeError(error) : error;
+    probeStrikes.set(dev, { count, error: reported, missingSince: 0 });
+    throw reported;
   }
   finally { p.probePromise = null; }
+}
+
+// The error a path keeps showing once its probes have stopped.
+function stoppedProbeError(error) {
+  let message = String(error.message || error);
+  if (/^port closed$|^Board disconnected/.test(message)) {
+    message = 'Board keeps dropping off USB while it is identified (it may be restarting in a loop).';
+  }
+  return new Error(message + ' Stopped after ' + PROBE_STRIKE_LIMIT + ' tries: press Scan to try again.');
 }
 
 // The route for writing to a board: a writable mounted CIRCUITPY volume, else serial.
@@ -1523,6 +1555,13 @@ let loggedNoDevices = false;
 async function scanDevices({ waitForProbes = true } = {}) {
   const devs = listDevs();
   const bootDevices = deviceListOverride ? Promise.resolve(bootselDeviceOverride || []) : bootselDevices();
+  // A path gone for 2 s or more was unplugged: forget its failed probes. A board resetting
+  // in a loop is gone for well under a second each time, so its failures add up.
+  for (const [dev, strikes] of probeStrikes) {
+    if (devs.includes(dev)) strikes.missingSince = 0;
+    else if (!strikes.missingSince) strikes.missingSince = Date.now();
+    else if (Date.now() - strikes.missingSince >= 2000) probeStrikes.delete(dev);
+  }
   // Forget ports whose device is gone or now belongs to another board.
   for (const [dev, port] of ports) {
     if (devs.includes(dev)) {
@@ -1540,7 +1579,7 @@ async function scanDevices({ waitForProbes = true } = {}) {
   const serialDevices = await Promise.all(devs.map(async (dev) => {
     try {
       const port = getPort(dev);
-      if (!waitForProbes && !port.info &&
+      if (!waitForProbes && !port.info && !(probeStrikes.get(dev)?.count >= PROBE_STRIKE_LIMIT) &&
           !(port.probeFailure && Date.now() < port.probeFailure.retryAt)) {
         // Start/coalesce identification, but return the other boards immediately.
         if (Date.now() >= (port.rebootingUntil || 0)) void probe(dev).catch(() => {});
@@ -1922,6 +1961,11 @@ const ESP_FIRMWARE = {
     id: 'esp32-s3', name: 'MicroPython for ESP32-S3', build: 'ESP32_GENERIC_S3', chipId: 9,
     offset: 0,
     page: 'https://micropython.org/download/ESP32_GENERIC_S3/',
+  },
+  'ESP32-C6': {
+    id: 'esp32-c6', name: 'MicroPython for ESP32-C6', build: 'ESP32_GENERIC_C6', chipId: 13,
+    offset: 0,
+    page: 'https://micropython.org/download/ESP32_GENERIC_C6/',
   },
 };
 
@@ -2759,9 +2803,9 @@ function bootloaderMode(info) {
 function espResetStrategies(info, dev) {
   const serial = ['tight', 'tight-slow', 'classic', 'classic-slow'];
   // Windows COM names do not distinguish native USB from UART bridges.
-  // Try native USB on C3/S3 COM ports, retaining the UART fallbacks.
+  // Try native USB on C3/S3/C6 COM ports, retaining the UART fallbacks.
   const machine = info?.machine || '';
-  const mayBeUsbJtag = (!machine || /ESP32-?[CS]3/i.test(machine)) &&
+  const mayBeUsbJtag = (!machine || /ESP32-?(?:[CS]3|C6)/i.test(machine)) &&
     /(?:usbmodem|ttyACM|^COM\d+$)/i.test(dev);
   return mayBeUsbJtag ? ['usb-jtag', ...serial] : serial;
 }
@@ -3727,7 +3771,7 @@ const MCP_TOOLS = [
     // The page's "Install ctrlPi API".
     name: 'pico_ctrlpi_install',
     title: 'Install the ctrlPi API on a board',
-    description: 'Install or update the ctrlPi API agent on a Pico W, Pico 2 W or an ESP32 running MicroPython (pico-gpio-api or esp32-gpio-api, downloaded from GitHub; the ESP32 agent officially supports the ESP32, ESP32-S3 and ESP32-C3; other ESP32 chips are allowed but not officially supported). Writes app.mpy, upgrader.mpy and main.py (plus boot.py on an ESP32), then config.json (the board\'s own kept, with this api_key and name), wifi.txt and scripts/cpu-temp.py when missing, and resets the board. It replaces main.py, so ask the user first and pass confirmed: true.',
+    description: 'Install or update the ctrlPi API agent on a Pico W, Pico 2 W or an ESP32 running MicroPython (pico-gpio-api or esp32-gpio-api, downloaded from GitHub; the ESP32 agent officially supports the ESP32, ESP32-S3, ESP32-C3 and ESP32-C6; other ESP32 chips are allowed but not officially supported). Writes app.mpy, upgrader.mpy and main.py (plus boot.py on an ESP32), then config.json (the board\'s own kept, with this api_key and name), wifi.txt and scripts/cpu-temp.py when missing, and resets the board. It replaces main.py, so ask the user first and pass confirmed: true.',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: {
@@ -4208,8 +4252,8 @@ def read():
 `;
 
 // Which agent a board running MicroPython takes: 'pico' (Pico W, Pico 2 W), 'esp32' (any ESP32),
-// or null. The agent officially supports the ESP32, ESP32-S3 and ESP32-C3; other ESP32 chips
-// (S2, C5, C6) are allowed but not officially supported.
+// or null. The agent officially supports the ESP32, ESP32-S3, ESP32-C3 and ESP32-C6; other ESP32
+// chips (S2, C5) are allowed but not officially supported.
 function ctrlpiBoardKind(info) {
   if (info?.firmware !== 'micropython') return null;
   const machine = String(info?.machine || '').toLowerCase();
@@ -4508,6 +4552,7 @@ function createServer(options = {}) {
     if (p === '/api/devices') {
       if (q.manual === '1') {
         console.log('scanning for devices…');
+        probeStrikes.clear();
         for (const port of ports.values()) {
           if (port instanceof PicoPort && !port.busy && !port.probePromise && !espInstalls.has(port.dev)) {
             if (port.info?.bootMode) continue;
@@ -5043,12 +5088,14 @@ module.exports = {
   handleMcpHttp,
   writeFile,
   _test: {
+    probeStrikes,
     mountedPath,
     winResetEspLines,
     resetEspLines,
     initializeEspFlashStorage,
     clearDevices() {
       ports.clear();
+      probeStrikes.clear();
       espInstalls.clear();
       deviceListOverride = null;
       circuitVolumeOverride = null;

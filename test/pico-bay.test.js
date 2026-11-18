@@ -107,8 +107,8 @@ describe('serial discovery', () => {
 describe('ESP ROM detection', () => {
   after(() => viewer._test.clearDevices());
 
-  test('selects native USB reset for C3/S3 while preserving external UART reset', () => {
-    for (const machine of ['ESP32C3 module with ESP32-C3', 'ESP32-S3']) {
+  test('selects native USB reset for C3/S3/C6 while preserving external UART reset', () => {
+    for (const machine of ['ESP32C3 module with ESP32-C3', 'ESP32-S3', 'ESP32-C6', 'ESP32C6 module with ESP32C6']) {
       for (const dev of ['/dev/cu.usbmodem101', '/dev/ttyACM0', 'COM7']) {
         assert.equal(viewer.espResetStrategies({ machine }, dev)[0], 'usb-jtag');
         assert.ok(viewer.espResetStrategies({ machine }, dev).includes('classic'));
@@ -249,11 +249,12 @@ describe('ESP ROM detection', () => {
     } finally { viewer._test.clearDevices(); }
   });
 
-  test('identifies S2, C3, and S3 and preserves unknown chip IDs without guessing', async () => {
+  test('identifies S2, C3, S3, and C6 and preserves unknown chip IDs without guessing', async () => {
     for (const [options, name] of [
       [{ magic: 0x000007c6 }, 'ESP32-S2'],
       [{ modernId: 5 }, 'ESP32-C3'],
       [{ modernId: 9 }, 'ESP32-S3'],
+      [{ modernId: 13 }, 'ESP32-C6'],
       [{ modernId: 999 }, 'Espressif chip (unidentified)'],
     ]) {
       const { port } = romPort(options);
@@ -328,6 +329,61 @@ describe('ESP ROM detection', () => {
     assert.equal(port.probePromise, null);
   });
 
+  test('explains a blank flash from what the board printed before its port closed', async () => {
+    const { port } = romPort({ stub: true });
+    let attempts = 0;
+    port._enterRaw = async () => {
+      attempts++;
+      port._onData('invalid header: 0xffffffff\r\n');
+      throw new Error('port closed');
+    };
+    await assert.rejects(viewer.probe(port.dev), /invalid flash header.*Hold BOOT/);
+    assert.equal(attempts, 2);
+  });
+
+  test('a port that closes ends the raw REPL retries at once', async () => {
+    const { port } = romPort();
+    let writes = 0;
+    port.write = async () => { writes++; throw new Error('port closed'); };
+    await assert.rejects(Object.getPrototypeOf(port)._enterRaw.call(port), { message: 'port closed' });
+    assert.equal(writes, 1);
+  });
+
+  test('stops identifying a path after three failures in a row until it is unplugged', async () => {
+    const strikes = viewer._test.probeStrikes;
+    // A board identified after a failure starts again from none.
+    const good = romPort().port;
+    strikes.set(good.dev, { count: 1, error: new Error('port closed'), missingSince: 0 });
+    await viewer.probe(good.dev);
+    assert.equal(strikes.has(good.dev), false);
+
+    const { port } = romPort({ stub: true });
+    let attempts = 0;
+    port._enterRaw = async () => { attempts++; throw new Error('port closed'); };
+    viewer._test.setDevices([{ dev: port.dev, port }]);
+    try {
+      // Two earlier failures on this path, each on the board's previous connection.
+      strikes.set(port.dev, { count: 2, error: new Error('port closed'), missingSince: 0 });
+      await assert.rejects(viewer.probe(port.dev), /keeps dropping off USB.*Stopped after 3 tries: press Scan/);
+      const tried = attempts;
+      // The board came back as a new port: it is listed with the reason, not probed again.
+      port.probeFailure = null;
+      for (let i = 0; i < 2; i++) {
+        const [device] = await viewer.scanDevices({ waitForProbes: false });
+        assert.equal(device.probing, undefined);
+        assert.match(device.error, /Stopped after 3 tries/);
+      }
+      assert.equal(attempts, tried);
+      // Missing at one scan (a reset) keeps the count; missing for 2 s or more forgets it.
+      viewer._test.setDevices([]);
+      await viewer.scanDevices({ waitForProbes: false });
+      assert.equal(strikes.get(port.dev).count, 3);
+      strikes.get(port.dev).missingSince -= 2000;
+      await viewer.scanDevices({ waitForProbes: false });
+      assert.equal(strikes.has(port.dev), false);
+    } finally { viewer._test.clearDevices(); }
+  });
+
   test('returns healthy boards while another probe is pending and coalesces polls', async () => {
     let release;
     const gate = new Promise(resolve => { release = resolve; });
@@ -378,6 +434,7 @@ describe('ESP ROM detection', () => {
       ['ESP32-S2', 2, 0x1000, 'ESP32_GENERIC_S2'],
       ['ESP32-C3', 5, 0, 'ESP32_GENERIC_C3'],
       ['ESP32-S3', 9, 0, 'ESP32_GENERIC_S3'],
+      ['ESP32-C6', 13, 0, 'ESP32_GENERIC_C6'],
     ];
     for (const [chip, chipId, offset, build] of mappings) {
       const firmware = viewer.espFirmwareForChip(chip);
@@ -386,7 +443,7 @@ describe('ESP ROM detection', () => {
       assert.equal(firmware.build, build);
       assert.equal(viewer.espImageInfo(makeEspImage(chipId), chipId).flashSize, 4 * 1024 * 1024);
     }
-    assert.equal(viewer.espFirmwareForChip('ESP32-C6'), null);
+    assert.equal(viewer.espFirmwareForChip('ESP32-C5'), null);
     const firmware = viewer.espFirmwareForChip('ESP32-S3');
     assert.equal(viewer.resolveEspFirmwareUrl(firmware,
       '<a href="/resources/firmware/ESP32_GENERIC_S3-v1.app-bin">app</a>' +
@@ -555,6 +612,7 @@ describe('ESP ROM detection', () => {
   test('hard-resets ESP32 UART and native USB after verification and retains the startup session', async () => {
     for (const [chipId, chip, dev, resetMode] of [
       [0, 'ESP32', '/dev/ttyUSB0', 'normal'], [5, 'ESP32-C3', '/dev/ttyACM0', 'usb-normal'],
+      [13, 'ESP32-C6', '/dev/cu.usbmodem1101', 'usb-normal'],
     ]) {
     const image = makeEspImage(chipId);
     const md5 = require('node:crypto').createHash('md5').update(image).digest('hex');
@@ -1626,9 +1684,9 @@ describe('ctrlPi API install', () => {
     assert.equal(kind('Generic ESP32 module with ESP32'), 'esp32');
     assert.equal(kind('ESP32S3 module with ESP32S3'), 'esp32');
     assert.equal(kind('ESP32C3 module with ESP32C3'), 'esp32');
+    assert.equal(kind('ESP32C6 module with ESP32C6'), 'esp32');
     // Allowed, but not officially supported.
     assert.equal(kind('ESP32-S2 module with ESP32-S2'), 'esp32');
-    assert.equal(kind('ESP32C6 module with ESP32C6'), 'esp32');
     assert.equal(kind('ESP32C5 module with ESP32C5'), 'esp32');
     assert.equal(kind('Generic ESP32 module with ESP32', 'circuitpython'), null);
     assert.equal(kind('Raspberry Pi Pico W with rp2040', 'circuitpython'), null);

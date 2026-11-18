@@ -140,6 +140,8 @@
   .btn.primary:hover:not(:disabled) { background: #1a7f37; }
   #save-btn.btn.primary { background: #0969da; border-color: #0969da; }
   #save-btn.btn.primary:hover:not(:disabled) { background: #0860ca; }
+  #welcome-rescan-btn.btn.primary { background: #0969da; border-color: #0969da; }
+  #welcome-rescan-btn.btn.primary:hover:not(:disabled) { background: #0860ca; }
   .btn.del { color: #cf222e; }
   .btn.del:hover:not(:disabled) { background: #ffebe9; border-color: #cf222e; color: #cf222e; }
   .file.drop-target { background: #ddf4ff; outline: 2px dashed #0969da; }
@@ -334,6 +336,8 @@
   }
   #placeholder p { font-size: 18px; font-weight: 600; color: #57606a; }
   #placeholder small { font-size: 13px; }
+  /* A long message (a failed identification) wraps in a centred column. */
+  #ph-sub { max-width: 600px; padding: 0 16px; text-align: center; }
   /* Install options: model buttons, mount command, chip details, recovery steps. */
   #bootsel-options { display: none; flex-direction: column; align-items: center; gap: 12px; margin: 12px 0 14px; }
   #bootsel-options .board-choices { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
@@ -949,6 +953,8 @@
   body.dark-mode #scroll.dropping, html.dark-mode #scroll.dropping { background: rgba(56,139,253,0.08); }
   body.dark-mode #save-btn.btn.primary, html.dark-mode #save-btn.btn.primary { background: #1f6feb; border-color: #1f6feb; }
   body.dark-mode #save-btn.btn.primary:hover:not(:disabled), html.dark-mode #save-btn.btn.primary:hover:not(:disabled) { background: #388bfd; }
+  body.dark-mode #welcome-rescan-btn.btn.primary, html.dark-mode #welcome-rescan-btn.btn.primary { background: #1f6feb; border-color: #1f6feb; }
+  body.dark-mode #welcome-rescan-btn.btn.primary:hover:not(:disabled), html.dark-mode #welcome-rescan-btn.btn.primary:hover:not(:disabled) { background: #388bfd; }
 
   body.dark-mode .tok-kw, html.dark-mode .tok-kw   { color: #ff7b72; }
   body.dark-mode .tok-str, html.dark-mode .tok-str  { color: #a5d6ff; }
@@ -1217,7 +1223,9 @@
           <p><strong class="welcome-heading">Your next project starts here.</strong></p>
           <p>Connect a Raspberry Pi Pico or ESP32 board using a USB data cable.<br>
           It will appear in the top bar automatically.</p>
-          <button class="btn primary" onclick="showReadme()">Getting started</button>
+          <!-- Shown once a scan has finished (setScanning). -->
+          <button class="btn primary" id="welcome-rescan-btn" onclick="refreshDevices()" style="display: none">Rescan</button>
+          <button class="btn primary" onclick="showReadme()">Read the guide</button>
         </div>
         <!-- Install options for BOOTSEL and ESP download-mode devices. -->
         <div id="bootsel-options"></div>
@@ -1333,6 +1341,7 @@
   var placeholder = document.getElementById('placeholder');
   var phTitle   = document.getElementById('ph-title');
   var phSub     = document.getElementById('ph-sub');
+  var welcomeRescanBtn = document.getElementById('welcome-rescan-btn');
   var bootselOptionsEl = document.getElementById('bootsel-options');
   var bootselSourceEl = document.getElementById('bootsel-source');
   var filenameEl = document.getElementById('filename');
@@ -1376,6 +1385,14 @@
   var mainScreenEl = document.getElementById('main');
   var readmeScreenEl = document.getElementById('readme-screen');
   var readmeContentEl = document.getElementById('readme-content');
+  // A README image that does not load (a private repository's CI badge, or no internet) is
+  // left out, with its link, instead of showing as a broken image.
+  readmeContentEl.addEventListener('error', function (e) {
+    var img = e.target;
+    if (img.tagName !== 'IMG') return;
+    var link = img.parentNode;
+    (link.tagName === 'A' && link.childNodes.length === 1 ? link : img).remove();
+  }, true);
 
   // App state: the device list, the selected board and its files, the open file, the
   // console stream, scan and install progress, warnings, dialog and console buffers.
@@ -1760,11 +1777,13 @@
     }).join('');
   }
 
-  // Spins the Scan button while a scan runs.
+  // Spins the Scan button while a scan runs; the welcome screen's Rescan shows only once
+  // a scan has finished.
   function setScanning(scanning) {
     var refreshButton = document.getElementById('refresh-btn');
     refreshButton.classList.toggle('refreshing', scanning);
     refreshButton.disabled = scanning;
+    welcomeRescanBtn.style.display = scanning || !initialScanComplete ? 'none' : '';
   }
 
   // Polls the device list: keeps the selection when possible, follows install jobs, and
@@ -1814,6 +1833,7 @@
           return;
         }
         initialScanComplete = true;
+        setScanning(devices.some(function (d) { return d.probing; }));
       }
       // Re-select the board when its state changed (identified, failed, or new chip details).
       if (!welcomeSelected && previousDevice && selectedDevice &&
@@ -1909,7 +1929,7 @@
     // "Install ctrlPi API" is offered on a Pico W / Pico 2 W and on any ESP32 running MicroPython
     // (the same boards the server accepts). On any other board (a Pico without WiFi, any board
     // running CircuitPython) it is shown greyed out. The agent officially supports the ESP32,
-    // ESP32-S3 and ESP32-C3: another ESP32 chip (S2, C5, C6) is offered with a note.
+    // ESP32-S3, ESP32-C3 and ESP32-C6: another ESP32 chip (S2, C5) is offered with a note.
     var ctrlPiBtn = document.getElementById('ctrlpi-install-btn');
     if (ctrlPiBtn) {
       var machine = device && device.machine ? device.machine.toLowerCase() : '';
@@ -1917,7 +1937,7 @@
       var ctrlPiKind = circuitPython ? ''
         : /\bpico (?:2 )?w\b/.test(machine) ? 'pico'
         : device && device.firmware === 'micropython' && /esp32/.test(machine) ? 'esp32' : '';
-      var ctrlPiUnofficial = ctrlPiKind === 'esp32' && /esp32-?[a-z]\d/.test(machine) && !/esp32-?(?:s3|c3)/.test(machine);
+      var ctrlPiUnofficial = ctrlPiKind === 'esp32' && /esp32-?[a-z]\d/.test(machine) && !/esp32-?(?:s3|c3|c6)/.test(machine);
       ctrlPiBtn.dataset.kind = ctrlPiKind;
       ctrlPiBtn.dataset.unofficial = ctrlPiUnofficial ? '1' : '';
       ctrlPiBtn.style.display = on ? 'block' : 'none';

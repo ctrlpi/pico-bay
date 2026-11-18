@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.40](https://img.shields.io/badge/version-0.9.40-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.41](https://img.shields.io/badge/version-0.9.41-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![Tools: 14](https://img.shields.io/badge/tools-14-006400.svg)](#mcp-tools)
@@ -25,7 +25,7 @@ Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-
 
 ## Devices
 
-- Supports Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython, including Pico, Pico W, Pico 2, Pico 2 W, ESP32, ESP32-S2, ESP32-C3, and ESP32-S3.
+- Supports Raspberry Pi Pico and ESP32 boards with MicroPython or CircuitPython, including Pico, Pico W, Pico 2, Pico 2 W, ESP32, ESP32-S2, ESP32-C3, ESP32-C6, and ESP32-S3.
 - Detects multiple connected boards and follows USB hot-plug events.
 - Detects MicroPython or CircuitPython automatically, including whether its filesystem is read-only or writable.
 - Detects RP2040 and RP2350 BOOTSEL mode and installs the latest MicroPython firmware for the selected Pico model.
@@ -112,7 +112,7 @@ The server supports MCP revision `2026-07-28` and the legacy initialize flow thr
 | `pico_board_interrupt` | Send Ctrl-C to interrupt a running program. |
 | `pico_board_reset` | Soft-reset a board or request a supported hard reset. |
 | `pico_board_bootloader` | Put a board into BOOTSEL or ESP32 download mode for `pico_install`. |
-| `pico_ctrlpi_install` | Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3 or ESP32-C3. |
+| `pico_ctrlpi_install` | Install or update the ctrlPi API agent on a Pico W, Pico 2 W, ESP32, ESP32-S3, ESP32-C3 or ESP32-C6. |
 | `pico_ui` | Open the web UI in the browser, or return its address when pico-bay runs on another computer. `action: "stop"` stops it. |
 | `pico_install` | Check and install MicroPython on a Pico in BOOTSEL mode or a supported ESP32 in DOWNLOAD mode. |
 
@@ -125,7 +125,7 @@ On a board running MicroPython, **Install ctrlPi API** in the top-right menu tur
 | Board | Agent | Files downloaded from GitHub |
 |---|---|---|
 | Pico W, Pico 2 W | [`pico-gpio-api`](https://github.com/ctrlpi/pico-gpio-api) | `app.mpy`, `upgrader.mpy`, `main.py` |
-| ESP32, ESP32-S3, ESP32-C3 | [`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api) | `app.mpy`, `boot.py`, `upgrader.mpy`, `main.py` |
+| ESP32, ESP32-S3, ESP32-C3, ESP32-C6 | [`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api) | `app.mpy`, `boot.py`, `upgrader.mpy`, `main.py` |
 
 `app.mpy` is the agent, precompiled, `upgrader.mpy` runs its over-the-air `/upgrade`, and `main.py` loads one of them. Fill in the WiFi SSID and password, and optionally an API key and an agent name; pico-bay downloads the latest files, checks them, writes them (`main.py` last) together with `config.json`, `wifi.txt` and a sample `scripts/cpu-temp.py` sensor for that board, and resets it. The menu item is greyed out on other boards (a Pico without WiFi, or CircuitPython).
 
@@ -336,9 +336,9 @@ The test suite covers parsing, ZIP handling, device discovery, HTTP and MCP APIs
 - **[`pi-gpio-api`](https://github.com/ctrlpi/pi-gpio-api)**: Raspberry Pi GPIO REST server that reads inputs and drives outputs (and named sensors) over an HTTP API.
 - **[`pico-gpio-api`](https://github.com/ctrlpi/pico-gpio-api)**: Raspberry Pi Pico W port of the GPIO REST server, with the same endpoints, wire format, and auth.
 - **[`esp32-gpio-api`](https://github.com/ctrlpi/esp32-gpio-api)**: ESP32 port of the GPIO REST server for MicroPython, with the same endpoints, wire format, and auth.
-- **[`mcp-bridge`](https://github.com/ctrlpi/mcp-bridge)**: MCP server that exposes GPIO control as tools for AI agents (e.g. Claude), executing them over the agents' REST API.
+- **[`ctrlpi-mcp`](https://github.com/ctrlpi/ctrlpi-mcp)**: MCP server that exposes GPIO control as tools for AI agents (e.g. Claude), executing them over the agents' REST API.
 - **[`homebridge-ctrlpi`](https://github.com/ctrlpi/homebridge-ctrlpi)**: A Homebridge plugin that brings Raspberry Pi, Pico W, and ESP32 GPIO into Apple Home, by driving one or more GPIO agents over their REST API.
-- **`matter-bridge`** *(coming soon)*: Matter bridge that exposes GPIO pins and sensors to any Matter platform (Apple Home, Google Home, Alexa, Home Assistant), driven over the agents' REST API.
+- **`ctrlpi-matter`** *(coming soon)*: Matter bridge that exposes GPIO pins and sensors to any Matter platform (Apple Home, Google Home, Alexa, Home Assistant), driven over the agents' REST API.
 - **[`ctrlpi-cli`](https://github.com/ctrlpi/ctrlpi-cli)**: Command-line interface for interacting with ctrlPi agents, with shared agent configuration.
 - **[`ctrlpi-lab`](https://github.com/ctrlpi/ctrlpi-lab)**: A local browser dashboard for your ctrlPi setup. Test GPIO and sensor endpoints, watch webhook events, and tail agent logs.
 - **[`pi-bay`](https://github.com/ctrlpi/pi-bay)**: A local web app and MCP server for Raspberry Pi boards over the network. Edit files, open a remote terminal, and manage your Pi remotely.
