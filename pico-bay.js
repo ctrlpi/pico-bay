@@ -51,9 +51,12 @@ Options:
   --hold MILLISECONDS Board release delay
   --allow-host NAME   Also accept requests addressed to this host name
   --no-open           Do not open a browser
-  --mcp-stdio         Run MCP over stdio (automatic when an MCP client starts pico-bay)
-  --mcp-http          Enable MCP over HTTP
-  --no-mcp            Disable MCP
+  --ui on|off         Serve the web UI and its API (default on)
+  --mcp off|http|stdio  MCP transport (default: http on a Raspberry Pi, otherwise off,
+                      or stdio when an MCP client starts pico-bay with no --ui or --mcp)
+                      --ui off serves only /mcp, /hello and /remote-config (http MCP);
+                      --mcp stdio has no web UI
+  --config PATH       Config folder, or the pico-bay-config.json file itself (default ~/.ctrlpi)
   --help              Show this help
   --version           Show the version`);
   process.exit(0);
@@ -64,9 +67,7 @@ let holdArg = null;
 let hostArg = null;
 const allowHostArgs = [];
 let noOpen = envEnabled(process.env.PICO_NO_OPEN);
-let cliMcpStdio = false;
-let cliMcpHttp = false;
-let cliNoMcp = envEnabled(process.env.PICO_NO_MCP);
+let configArg = null;
 // Flags that take a value read the next argument.
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--port') portArg = args[++i];
@@ -74,10 +75,49 @@ for (let i = 0; i < args.length; i++) {
   else if (args[i] === '--host') hostArg = args[++i];
   else if (args[i] === '--allow-host') allowHostArgs.push(args[++i]);
   else if (args[i] === '--no-open') noOpen = true;
-  else if (args[i] === '--mcp-stdio') cliMcpStdio = true;
-  else if (args[i] === '--mcp-http') cliMcpHttp = true;
-  else if (args[i] === '--no-mcp') cliNoMcp = true;
+  else if (args[i] === '--config') configArg = args[++i] ?? '';
 }
+
+// --ui on|off and --mcp off|http|stdio (or PICO_UI and PICO_MCP); a flag wins over its variable.
+// --ui off alone means HTTP MCP, and stdio MCP means no web UI. With neither set, the host's
+// defaults apply and a piped stdin is checked for an MCP client. A bad value or a pair that
+// leaves nothing to serve comes back as `error`.
+function parseMode(argv, env) {
+  let ui = null;
+  let mcp = null;
+  let error = null;
+  const value = (i, name, allowed) => {
+    const v = String(argv[i + 1] || '').toLowerCase();
+    if (!allowed.includes(v)) error = error || name + ' takes ' + allowed.join(', ');
+    return allowed.includes(v) ? v : null;
+  };
+  const fromEnv = (v, name, allowed) => {
+    if (v === undefined || v === '') return null;
+    const low = String(v).toLowerCase();
+    if (allowed.includes(low)) return low;
+    error = error || name + ' takes ' + allowed.join(', ');
+    return null;
+  };
+  ui = fromEnv(env.PICO_UI, 'PICO_UI', ['on', 'off']);
+  mcp = fromEnv(env.PICO_MCP, 'PICO_MCP', ['off', 'http', 'stdio']);
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--ui') ui = value(i, '--ui', ['on', 'off']) || ui;
+    else if (argv[i] === '--mcp') mcp = value(i, '--mcp', ['off', 'http', 'stdio']) || mcp;
+  }
+  const given = ui !== null || mcp !== null;
+  if (ui === 'off' && mcp === null) mcp = 'http';
+  if (ui === 'off' && mcp === 'off') error = error || 'Nothing to serve: --ui off needs --mcp http';
+  if (ui === 'off' && mcp === 'stdio') ui = null;
+  if (ui === 'on' && mcp === 'stdio') error = error || '--mcp stdio has no web UI: do not combine it with --ui on';
+  return { ui, mcp, given, error, uiOff: ui === 'off' };
+}
+const mode = parseMode(args, process.env);
+const cliMcpStdio = mode.mcp === 'stdio';
+const cliMcpHttp = mode.mcp === 'http';
+const cliNoMcp = mode.mcp === 'off';
+// --ui off serves HTTP MCP alone and never opens a browser.
+const mcpOnly = mode.uiOff;
+if (mcpOnly) noOpen = true;
 const PORT = parseInt(portArg || process.env.PICO_PORT || '7426', 10);
 // How many ports after PORT are tried when another program holds it.
 const PORT_FALLBACKS = 3;
@@ -108,32 +148,89 @@ function hostAllowed(hostHeader, extra = [], hostname = os.hostname()) {
   return extra.includes(name);
 }
 
-// Which MCP transports run: command-line flags win over the environment, --no-mcp turns
-// both off, and a Raspberry Pi gets HTTP MCP unless stdio was chosen.
+// Which MCP transports run: --mcp turns one on or off; with none given a Raspberry Pi gets HTTP MCP.
 function selectMcpTransports(options) {
   if (options.noMcp) return { stdio: false, http: false };
-  const cliTransport = options.cliStdio || options.cliHttp;
-  const stdio = cliTransport ? options.cliStdio : envEnabled(options.envStdio);
-  const http = cliTransport ? options.cliHttp :
-    envEnabled(options.envHttp) || (options.raspberryPiHost && !stdio);
+  const stdio = options.cliStdio;
+  const http = options.cliHttp || (options.raspberryPiHost && !options.cliStdio);
   return { stdio, http };
 }
 
 const selectedMcp = selectMcpTransports({
   raspberryPiHost: RASPBERRY_PI_HOST, noMcp: cliNoMcp,
   cliStdio: cliMcpStdio, cliHttp: cliMcpHttp,
-  envStdio: process.env.PICO_MCP_STDIO, envHttp: process.env.PICO_MCP_HTTP,
 });
 const mcpStdio = selectedMcp.stdio;
 const mcpHttp = selectedMcp.http;
-// With no MCP flag or variable at all, a piped stdin is checked for an MCP client.
-const mcpAutodetect = !cliNoMcp && !cliMcpStdio && !cliMcpHttp &&
-  process.env.PICO_MCP_STDIO === undefined && process.env.PICO_MCP_HTTP === undefined;
+// With no --ui or --mcp (and no variable), a piped stdin is checked for an MCP client.
+const mcpAutodetect = !mode.given;
 // A busy default port may move to the next ones, but never a port that was asked for, a
 // Raspberry Pi host or HTTP MCP: bookmarks and MCP clients are set to a fixed address.
 const portFallback = !portArg && !process.env.PICO_PORT && !RASPBERRY_PI_HOST && !mcpHttp;
-// --no-mcp together with an MCP flag is reported at startup.
-const conflictingMcpFlags = cliNoMcp && (cliMcpStdio || cliMcpHttp);
+
+// The HTTP MCP key, in ~/.ctrlpi/pico-bay-config.json as {mcp: {api_key, key_set}}.
+// Until a key is set the default is accepted, and the first different key a caller
+// sends to /mcp is claimed (trust on first use); POST /remote-config changes it.
+const DEFAULT_MCP_KEY = 'your-mcp-key';
+// --config <folder> holds pico-bay-config.json; a .json path is the file itself.
+function resolveConfigFile(configPath) {
+  if (!configPath) return path.join(os.homedir(), '.ctrlpi', 'pico-bay-config.json');
+  const full = path.resolve(configPath);
+  return full.toLowerCase().endsWith('.json') ? full : path.join(full, 'pico-bay-config.json');
+}
+const CONFIG_FILE = resolveConfigFile(configArg);
+// A new key: 1-128 printable ASCII characters, no spaces.
+const NEW_MCP_KEY = /^[\x21-\x7e]{1,128}$/;
+
+function loadOwnConfig(file) {
+  try {
+    const own = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return own && typeof own === 'object' && !Array.isArray(own) ? own : {};
+  } catch { return {}; }
+}
+
+function mcpKey(file) {
+  const mcp = loadOwnConfig(file).mcp;
+  return (mcp && typeof mcp.api_key === 'string' && mcp.api_key) || DEFAULT_MCP_KEY;
+}
+
+// UTC 'YYYY-MM-DD HH:MM:SS'.
+function nowStamp(date = new Date()) {
+  return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// Saves a new key; false when it could not be written (the old key stays).
+function saveMcpKey(file, key, keySet) {
+  const own = loadOwnConfig(file);
+  own.mcp = { ...(own.mcp && typeof own.mcp === 'object' ? own.mcp : {}), api_key: key, key_set: keySet };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(own, null, 4));
+    return true;
+  } catch (error) {
+    console.error('[SECURITY] Could not save the MCP key to ' + file + ' (' + error.message + '), the old key stays.');
+    return false;
+  }
+}
+
+// Constant-time comparison.
+function keysMatch(provided, expected) {
+  const a = Buffer.from(String(provided ?? ''), 'utf8');
+  const b = Buffer.from(String(expected ?? ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// The Api-Key check on /mcp, claiming the first different key while on the default.
+function mcpKeyAccepted(req, file) {
+  const expected = mcpKey(file);
+  const provided = String(req.headers['api-key'] ?? '');
+  if (expected === DEFAULT_MCP_KEY && provided && provided !== DEFAULT_MCP_KEY && NEW_MCP_KEY.test(provided)) {
+    if (!saveMcpKey(file, provided, nowStamp())) return false;
+    console.error('MCP Api-Key claimed by the first caller and saved to ' + file + '. Only that key is accepted now.');
+    return true;
+  }
+  return keysMatch(provided, expected);
+}
 
 // Delay before leaving raw REPL and restarting main.py. Zero resets immediately.
 const HOLD_MS = parseInt(holdArg || process.env.PICO_HOLD_MS || '900', 10);
@@ -3623,7 +3720,7 @@ const MCP_TOOLS = [
     // Creates one folder.
     name: 'pico_directory_create',
     title: 'Create a board directory',
-    description: 'Create one directory on the selected board.',
+    description: 'Create a directory on the selected board, with any missing parent directories. An existing directory is not an error.',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: { board_id: boardIdProperty, path: boardPathProperty },
@@ -3642,7 +3739,7 @@ const MCP_TOOLS = [
     // Renames or moves a file or folder.
     name: 'pico_path_rename',
     title: 'Rename or move a board path',
-    description: 'Rename or move one file or directory on the selected board.',
+    description: 'Rename or move one file or directory on the selected board. The destination\'s folder must already exist, and an existing file at the destination may be replaced: check first.',
     inputSchema: {
       type: 'object', additionalProperties: false,
       properties: { board_id: boardIdProperty, from: boardPathProperty, to: boardPathProperty },
@@ -3819,6 +3916,7 @@ const MCP_TOOLS = [
       const args = validateToolArgs(raw, ['action']);
       const action = args.action === undefined ? 'open' : args.action;
       if (action !== 'open' && action !== 'stop') throw new Error('action must be one of: open, stop');
+      if (context && context.mcpOnly) throw new Error('pico-bay runs with --ui off, so its web UI is off.');
       return mcpToolResult(action === 'stop' ? await stopUi() : await openUi(context));
     },
   },
@@ -4160,8 +4258,9 @@ let mcpHttpActive = 0;
 
 // Streamable HTTP MCP at POST /mcp: checks Origin and body size, requires the
 // current revision's Mcp-* headers to match the body, accepts the older revisions,
-// allows at most 8 tool calls at once, and answers plain JSON (no SSE).
-async function handleMcpHttp(req, res) {
+// allows at most 8 tool calls at once, and answers plain JSON (no SSE). Needs the MCP
+// key in Api-Key (options.configFile holds it).
+async function handleMcpHttp(req, res, options = {}) {
   if (!validMcpOrigin(req)) {
     mcpHttpError(res, 403, null, -32020, 'Invalid Origin header');
     return;
@@ -4169,6 +4268,11 @@ async function handleMcpHttp(req, res) {
   if (req.method !== 'POST') {
     res.writeHead(405, { Allow: 'POST' });
     res.end();
+    return;
+  }
+  if (!mcpKeyAccepted(req, options.configFile || CONFIG_FILE)) {
+    console.error('[SECURITY] /mcp refused from ' + req.socket.remoteAddress + ': wrong or missing Api-Key');
+    sendJSON(res, 403, { error: 'Invalid or missing Api-Key header' });
     return;
   }
   let msg;
@@ -4209,7 +4313,7 @@ async function handleMcpHttp(req, res) {
   }
   if (toolCall) mcpHttpActive++;
   let response;
-  try { response = await dispatchMcp(msg, { host: req.headers.host }); }
+  try { response = await dispatchMcp(msg, { host: req.headers.host, mcpOnly: options.mcpOnly === true }); }
   finally { if (toolCall) mcpHttpActive--; }
   if (!response) {
     res.writeHead(202);
@@ -4219,6 +4323,53 @@ async function handleMcpHttp(req, res) {
   // The current revision answers an unknown method with 404.
   const unknownModernMethod = modern && response.error && response.error.code === -32601;
   sendJSON(res, unknownModernMethod ? 404 : 200, response);
+}
+
+// GET /hello: no key, so ctrlpi-remote can find pico-bay on the LAN. `key` is true once
+// a key is set, false while still on the default (claimable).
+function handleHello(req, res, configFile) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { Allow: 'GET, HEAD' });
+    res.end();
+    return;
+  }
+  sendJSON(res, 200, { service: 'pico-bay', key: mcpKey(configFile) !== DEFAULT_MCP_KEY });
+}
+
+// POST /remote-config {"api_key": "<new>"} with the current key in Api-Key: changes the
+// MCP key over the network. Never claims a key (that is /mcp's job).
+async function handleRemoteConfig(req, res, configFile) {
+  if (req.method !== 'POST') {
+    res.writeHead(405, { Allow: 'POST' });
+    res.end();
+    return;
+  }
+  if (!validMcpOrigin(req) || !keysMatch(req.headers['api-key'], mcpKey(configFile))) {
+    console.error('[SECURITY] /remote-config refused from ' + req.socket.remoteAddress + ': wrong or missing Api-Key');
+    sendJSON(res, 403, { error: 'Invalid or missing Api-Key header' });
+    return;
+  }
+  let body;
+  try { body = JSON.parse((await readBody(req, 4 * 1024)).toString('utf8')); }
+  catch (error) {
+    if (String(error.message || error) === 'body too large') {
+      sendJSON(res, 413, { error: 'Request body exceeds 4096 bytes' });
+      return;
+    }
+    body = null;
+  }
+  const key = body && typeof body === 'object' ? body.api_key : undefined;
+  if (typeof key !== 'string' || !NEW_MCP_KEY.test(key) || key === DEFAULT_MCP_KEY) {
+    sendJSON(res, 400, { error: 'api_key must be 1-128 printable characters without spaces, and not the default key' });
+    return;
+  }
+  const keySet = nowStamp();
+  if (!saveMcpKey(configFile, key, keySet)) {
+    sendJSON(res, 500, { error: 'Could not save the new key' });
+    return;
+  }
+  console.error('MCP Api-Key changed through /remote-config and saved to ' + configFile + '.');
+  sendJSON(res, 200, { key_set: keySet });
 }
 
 // ── ctrlPi API install ──────────────────────────────────────────────────────────
@@ -4383,7 +4534,10 @@ function createServer(options = {}) {
   };
   // The UI can switch HTTP MCP on and off while running. The installers and the agent
   // download can be replaced through options, which is how the tests run without boards.
-  let enableMcp = options.mcpHttp === true;
+  // --ui off: HTTP MCP on, and only /mcp, /hello and /remote-config answer.
+  const onlyMcp = options.mcpOnly === true;
+  let enableMcp = options.mcpHttp === true || onlyMcp;
+  const configFile = options.configFile || CONFIG_FILE;
   const installBootsel = options.installBootsel || installBootselFirmware;
   const installEsp = options.installEsp || installEspFirmware;
   const initializeStorage = options.initializeStorage || initializeEspStorage;
@@ -4501,11 +4655,16 @@ function createServer(options = {}) {
       return;
     }
 
+    // Discovery and the MCP key change, for ctrlpi-remote.
+    if (p === '/hello') { handleHello(req, res, configFile); return; }
+    if (p === '/remote-config') { await handleRemoteConfig(req, res, configFile); return; }
+
     // Streamable HTTP MCP, when enabled.
     if (p === '/mcp' && enableMcp) {
-      await handleMcpHttp(req, res);
+      await handleMcpHttp(req, res, { configFile, mcpOnly: onlyMcp });
       return;
     }
+    if (onlyMcp) { sendJSON(res, 404, { error: 'Not found' }); return; }
 
     // Reject cross-origin browser writes to the local API.
     if (p.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
@@ -4958,7 +5117,8 @@ function startServer(options = {}) {
     console.log(bar);
     for (const address of addresses) console.log(address);
     console.log(bar);
-    if (options.mcpHttp) console.log('MCP endpoint: ' + addresses[0] + '/mcp');
+    if (options.mcpHttp || options.mcpOnly) console.log('MCP endpoint: ' + addresses[0] + '/mcp');
+    console.log('ui: ' + (options.mcpOnly ? 'off' : 'on') + ', mcp: ' + (options.mcpHttp || options.mcpOnly ? 'http (key set: ' + (loadOwnConfig(options.configFile || CONFIG_FILE).mcp?.key_set === true ? 'yes' : 'no') + ')' : 'off'));
     if (HOST !== '127.0.0.1' && HOST !== 'localhost' && HOST !== '::1') {
       console.log('listening on ' + HOST + '; ensure this interface is trusted');
     }
@@ -4993,18 +5153,18 @@ function shutdown() {
 // Run as a program: one MCP transport at most, then stdio MCP or the web server. With no
 // MCP choice made, an MCP client talking on stdin gets stdio MCP.
 if (require.main === module) {
-  if (conflictingMcpFlags) {
-    console.error('Do not combine --no-mcp with --mcp-stdio or --mcp-http');
-    process.exitCode = 1;
-  } else if (mcpStdio && mcpHttp) {
-    console.error('Choose one MCP transport: --mcp-stdio or --mcp-http');
-    process.exitCode = 1;
+  if (configArg === '' || (configArg && configArg.startsWith('--'))) {
+    console.error('--config needs a folder or a .json file');
+    process.exit(2);
+  } else if (mode.error) {
+    console.error(mode.error);
+    process.exit(2);
   } else if (mcpStdio) {
     runMcpStdio();
   } else if (mcpAutodetect && stdinIsPipe()) {
     detectMcpStdio().then(mcp => (mcp ? runMcpStdio() : startServer({ mcpHttp, portFallback })));
   } else {
-    startServer({ mcpHttp, portFallback });
+    startServer({ mcpHttp, mcpOnly, portFallback });
   }
   // Ctrl-C or a service stop resets the boards before exiting.
   process.on('SIGINT', shutdown);
@@ -5013,6 +5173,7 @@ if (require.main === module) {
 
 // Exported for the test suite.
 module.exports = {
+  parseMode,
   hostAllowed,
   ctrlpiInstallFiles,
   ctrlpiFileError,
@@ -5071,6 +5232,7 @@ module.exports = {
   enterBootloader,
   rebootEspAfterInstall,
   selectMcpTransports,
+  resolveConfigFile,
   stdinIsPipe,
   isMcpLine,
   detectMcpStdio,

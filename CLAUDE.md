@@ -24,9 +24,10 @@ This repository lives at `pico-bay/` inside the ctrlpi workspace folder, next to
 npm start
 npm run dev
 npm test
-node pico-bay.js [--port 7426] [--host 127.0.0.1] [--allow-host NAME] [--hold 900] [--no-open] [--no-mcp]
-node pico-bay.js --mcp-stdio
-node pico-bay.js --mcp-http
+node pico-bay.js [--port 7426] [--host 127.0.0.1] [--allow-host NAME] [--hold 900] [--no-open] [--ui on|off] [--mcp off|http|stdio]
+node pico-bay.js --mcp stdio
+node pico-bay.js --mcp http
+node pico-bay.js --ui off
 node pico-bay.js --help
 node pico-bay.js --version
 ```
@@ -38,7 +39,7 @@ Configuration precedence is command line, environment, then default:
 - Allowed host names: `--allow-host` (repeatable or comma-separated) plus `PICO_ALLOW_HOSTS`. `hostAllowed()` checks the `Host` header on every route, `/mcp` included, against DNS rebinding: IP addresses, `localhost`, `os.hostname()` (with or without `.local`), the `--host` value and these names pass, anything else gets `403`.
 - Serial hold: `--hold`, `PICO_HOLD_MS`, `900` milliseconds.
 - Browser launch: `--no-open` or `PICO_NO_OPEN`; Raspberry Pi hosts never open a browser.
-- MCP: `--mcp-stdio`/`PICO_MCP_STDIO` or `--mcp-http`/`PICO_MCP_HTTP`. Raspberry Pi hosts enable HTTP MCP by default; `--no-mcp`/`PICO_NO_MCP` disables all MCP transports. With none of these set and stdin a pipe or socket, `detectMcpStdio()` reads the first line: a JSON-RPC message starts stdio MCP; anything else, a closed stdin or 2 seconds of silence starts the web app.
+- Mode: `--ui on|off` (`PICO_UI`) and `--mcp off|http|stdio` (`PICO_MCP`), parsed by `parseMode()`; a flag wins over its variable, and the old flags (`--mcp-stdio`, `--mcp-http`, `--mcp-only`, `--no-mcp`) and variables are ignored. `--ui off` alone means `--mcp http`; `--mcp stdio` means no web UI. `--ui off --mcp off`, `--ui on --mcp stdio` and a bad value exit with code 2. Raspberry Pi hosts enable HTTP MCP by default (`--mcp off` disables it). With neither `--ui` nor `--mcp` set (and no variable) and stdin a pipe or socket, `detectMcpStdio()` reads the first line: a JSON-RPC message starts stdio MCP; anything else, a closed stdin or 2 seconds of silence starts the web app. A web start logs `ui: on|off, mcp: off|http (key set: yes|no)`.
 
 Boolean environment values accept `true`, `false`, `1`, or `0`.
 
@@ -63,6 +64,13 @@ Important HTTP routes include:
 - `/api/readme` for the full-screen README view.
 - `/api/ctrlpi/install` for "Install ctrlPi API": `ctrlpiBoardKind()` picks the agent from the board (`pico-gpio-api` on a Pico W / Pico 2 W, `esp32-gpio-api` on any ESP32 running MicroPython (the agent officially supports the ESP32, ESP32-S3, ESP32-C3 and ESP32-C6); anything else is a `400`). `downloadCtrlpiAgent()` fetches its files from the project's GitHub `main` branch (`CTRLPI_AGENTS`: `app.mpy`, `upgrader.mpy` and `main.py`, plus `boot.py` on the ESP32; `upgrader.mpy` runs the agent's own `/upgrade`, and a board without it answers that with `500`), `ctrlpiFileError()` checks each the way the agent's upgrader does (`.mpy` header and size for both `.mpy` files), a leftover `upgrade.lock` is deleted first (it would boot the upgrader over the new files), and they are written with `main.py` last, then `config.json` (the board's own kept, with the new key and name), `wifi.txt`, and a `scripts/cpu-temp.py` for that board when it has none. `page.html` offers the menu item on the same boards, and shows it greyed out on every other running board (a Pico without WiFi, any board running CircuitPython). An ESP32 chip the agent does not officially support (S2, C5) is allowed: the menu item and the form carry a "not officially supported" note. A disabled menu item is grey whatever its own colour (the red Delete all files, the blue Install ctrlPi API). `installCtrlpi()` does the work for this route and for the `pico_ctrlpi_install` MCP tool (which needs `confirmed: true`). A key left empty, in the form or the tool, keeps the board's own and becomes `your-secret-key` on a board without one; the form shows that default in grey and does not require a key, and the result's `defaultKey` makes the page add the public-key warning to its success message. The tool passes `keepOmitted` to `ctrlpiInstallFiles()`, so a name left out keeps the board's own too, and a default key adds a `warning` to its result.
 - `/mcp` when Streamable HTTP MCP is enabled.
+- `/hello` and `/remote-config` (always served, for `ctrlpi-remote`): see "HTTP MCP key" below.
+
+### HTTP MCP key
+
+`POST /mcp` needs `Api-Key`. The key is `mcp.api_key` (with `mcp.key_set`) in `~/.ctrlpi/pico-bay-config.json` (`CONFIG_FILE`; `--config <folder>` holds it, a `.json` path is the file itself, `resolveConfigFile()`; a `--config` without a value exits with code 2), re-read on every request. The default `your-mcp-key` is accepted until the first different key (1-128 printable ASCII characters) claims it and is saved (`mcpKeyAccepted()`, trust on first use, not adopted when the file cannot be written); wrong or missing gets `403` and a `[SECURITY]` log line. `GET /hello` (no key) answers `{"service": "pico-bay", "key": <true once a key is set>}`. `POST /remote-config` with the current key and `{"api_key": "<new>"}` changes it: `200 {key_set}`, `403` (wrong key or foreign `Origin`), `400` (empty, the default, over 128 or not printable), `405`, `413` (over 4 KB), `500` (not saved); it never claims a key. Stdio MCP needs no key. Recovery: remove `mcp.api_key` from the file and the default works again. The web UI and its `/api/*` routes have no key.
+
+`--ui off` implies HTTP MCP, never opens a browser, and serves only `/mcp`, `/hello` and `/remote-config`: everything else, the page and `/api/mcp` included, is a `404`, and `pico_ui` refuses with a tool error. With `--mcp off` it exits with code 2.
 
 The `pico_ui` MCP tool opens this web UI (`openUi()`) or, with `action: "stop"`, stops it (`stopUi()`). Under stdio MCP no web server runs, so `ensureUiServer()` starts one on the first call, on the port or one of the next 3, or uses a pico-bay already running there; it lives until the client closes stdin. The browser opens only on a local desktop. For a client elsewhere (a Raspberry Pi host, a non-loopback `Host` on HTTP MCP, `SSH_CONNECTION` under stdio) or with `--no-open`, the result is `opened: false` and the `url` to open: the request's `Host`, the ssh session's address, else the first LAN address. Stop closes only a server the tool started; the app's own server and another running pico-bay stay up (`stopped: false`).
 

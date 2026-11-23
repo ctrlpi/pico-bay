@@ -7,20 +7,20 @@
     "source": "github"
   },
   "websiteUrl": "https://ctrlpi.com/pico-bay",
-  "version": "0.9.41",
+  "version": "0.9.50",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pico-bay",
-      "version": "0.9.41",
+      "version": "0.9.50",
       "transport": {
         "type": "stdio"
       },
       "packageArguments": [
         {
-          "type": "positional",
-          "value": "--mcp-stdio",
-          "valueHint": "transport"
+          "type": "named",
+          "name": "--mcp",
+          "value": "stdio"
         }
       ]
     }

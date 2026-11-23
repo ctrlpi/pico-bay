@@ -1,7 +1,7 @@
 # Pico Bay
 
 [![Platform: Cross-Platform](https://img.shields.io/badge/platform-Cross--Platform-006400.svg)](#quick-start)
-[![Version 0.9.41](https://img.shields.io/badge/version-0.9.41-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
+[![Version 0.9.50](https://img.shields.io/badge/version-0.9.50-blue.svg)](https://github.com/ctrlpi/pico-bay/tags)
 [![Node 20+](https://img.shields.io/badge/node-20%2B-blue.svg)](https://nodejs.org/)
 [![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-006400.svg)](#mcp-server)
 [![Tools: 14](https://img.shields.io/badge/tools-14-006400.svg)](#mcp-tools)
@@ -51,51 +51,41 @@ Port `7426` spells **`PICO`** on a phone keypad, a nod to the T9 years and flip-
 
 ## MCP server
 
-pico-bay includes a dependency-free [Model Context Protocol](https://modelcontextprotocol.io/) server, enabled by default on Raspberry Pi hosts. On macOS and other non-Pi hosts, enable MCP in the user interface or with `--mcp-stdio` or `--mcp-http`.
+pico-bay includes a dependency-free [Model Context Protocol](https://modelcontextprotocol.io/) server, enabled by default on Raspberry Pi hosts. On macOS and other non-Pi hosts, enable MCP in the user interface or with `--mcp stdio` or `--mcp http`.
 
-### Agent configuration
+### Claude Desktop and Claude Code
 
-In Claude Desktop, open **Settings → Developer → Edit Config** to get to the configuration file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, or the equivalent file on Windows or Linux), and add the server under `mcpServers`. `--mcp-stdio` is optional here: pico-bay detects an MCP client on stdin and starts stdio on its own.
+In Claude Desktop, open **Plugins** in the sidebar, choose **Add > Add marketplace** and enter `ctrlpi/claude-plugins`. The marketplace appears as `ctrlpi`; install `pico-bay` from it.
 
-```json
-{
-  "mcpServers": {
-    "pico-bay": {
-      "command": "npx",
-      "args": ["-y", "pico-bay", "--mcp-stdio"]
-    }
-  }
-}
-```
-
-Cursor takes the same JSON, here and under Streamable HTTP. Put it in `~/.cursor/mcp.json`, or in `.cursor/mcp.json` inside a project.
+In Claude Code, run `/plugin marketplace add ctrlpi/claude-plugins`, then `/plugin install pico-bay@ctrlpi`.
 
 ### Streamable HTTP
 
-Use HTTP when the MCP client runs on another computer or Raspberry Pi:
+To use pico-bay on a remote computer or Raspberry Pi, start it there:
 
 ```sh
-npx pico-bay --mcp-http
+npx pico-bay
 ```
 
-The normal web interface remains available and MCP is served at `http://HOST:7426/mcp`. Configure the MCP agent to connect over HTTP, replacing `PI_HOST_ADDR` with the platform running pico-bay:
+A Raspberry Pi serves MCP on the network by default; on another computer, add `--mcp http --host 0.0.0.0`.
+
+On the desktop, install `pico-bay-remote` from the `ctrlpi/claude-plugins` marketplace, or add [ctrlpi-remote](https://github.com/ctrlpi/ctrlpi-remote) to any MCP client:
 
 ```json
 {
   "mcpServers": {
-    "pico-bay": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://PI_HOST_ADDR:7426/mcp", "--allow-http"]
-    }
+    "pico-bay-remote": { "command": "npx", "args": ["-y", "ctrlpi-remote", "pico-bay"] }
   }
 }
 ```
 
-`--allow-http` permits the connection over a trusted local network. On macOS and other non-Pi hosts, add `--host 0.0.0.0` when starting pico-bay to make it reachable from another computer. A Raspberry Pi listens on the LAN by default.
+ctrlpi-remote finds pico-bay on your network and claims its key the first time. Nothing else to set.
 
-> **No authentication or TLS:** MCP tools can run code, overwrite files, reset boards, and permanently delete board files. HTTP mode is intended only for a trusted local network. Do not expose `/mcp` or pico-bay’s port directly to the internet.
+> **Key, no TLS:** `/mcp` accepts only the claimed key, saved in `~/.ctrlpi/pico-bay-config.json` on the remote machine (delete `mcp.api_key` there to reset). The web interface has no key: disable it with `--ui off`, so nothing answers without the key. Plain HTTP: trusted networks only.
 
 The server supports MCP revision `2026-07-28` and the legacy initialize flow through `2025-03-26`. It uses plain JSON responses rather than SSE because it does not send server-initiated messages.
+
+You can also use it with [mcp-remote](https://github.com/geelen/mcp-remote) from any client that only speaks stdio: `npx -y mcp-remote http://<host>:7426/mcp --allow-http --header "Api-Key:<your-mcp-key>"`. Unlike ctrlpi-remote, it does not find the server or claim its key for you.
 
 ### MCP tools
 
@@ -173,7 +163,7 @@ npx pico-bay
 ## Options
 
 ```text
-pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS] [--no-open] [--mcp-stdio | --mcp-http | --no-mcp] [--help] [--version]
+pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS] [--no-open] [--ui on|off] [--mcp off|http|stdio] [--config PATH] [--help] [--version]
 ```
 
 <table width="100%">
@@ -217,22 +207,22 @@ pico-bay [--port PORT] [--host ADDRESS] [--allow-host NAME] [--hold MILLISECONDS
       <td width="47%">Do not automatically open the default browser on start. Browsers are never opened automatically on Raspberry Pi hosts.</td>
     </tr>
     <tr>
-      <td width="20%"><code>--mcp-stdio</code></td>
-      <td width="20%"><code>PICO_MCP_STDIO</code></td>
-      <td width="13%"><code>false</code></td>
-      <td width="47%">Run only the MCP stdio transport. Optional when an MCP client starts pico-bay: it is detected automatically.</td>
+      <td width="20%"><code>--ui on|off</code></td>
+      <td width="20%"><code>PICO_UI</code></td>
+      <td width="13%"><code>on</code></td>
+      <td width="47%">Serve the web interface and its API. <code>off</code> serves only HTTP MCP (with its key), <code>/hello</code> and <code>/remote-config</code>, and <code>pico_ui</code> refuses.</td>
     </tr>
     <tr>
-      <td width="20%"><code>--mcp-http</code></td>
-      <td width="20%"><code>PICO_MCP_HTTP</code></td>
-      <td width="13%">Pi only</td>
-      <td width="47%">Add Streamable HTTP MCP at <code>/mcp</code> to the normal web server. Enabled automatically on Raspberry Pi hosts.</td>
+      <td width="20%"><code>--mcp off|http|stdio</code></td>
+      <td width="20%"><code>PICO_MCP</code></td>
+      <td width="13%"><code>http</code> on a Pi, else <code>off</code></td>
+      <td width="47%">MCP transport: <code>http</code> adds Streamable HTTP MCP at <code>/mcp</code>, <code>stdio</code> runs only the stdio transport (no web interface). With neither <code>--ui</code> nor <code>--mcp</code> given, an MCP client that starts pico-bay is detected automatically and gets stdio.</td>
     </tr>
     <tr>
-      <td width="20%"><code>--no-mcp</code></td>
-      <td width="20%"><code>PICO_NO_MCP</code></td>
-      <td width="13%"><code>false</code></td>
-      <td width="47%">Disable all MCP transports, including the Raspberry Pi HTTP default.</td>
+      <td width="20%"><code>--config</code></td>
+      <td width="20%">-</td>
+      <td width="13%"><code>~/.ctrlpi</code></td>
+      <td width="47%">The folder for <code>pico-bay-config.json</code> (the MCP key), or the key file's own <code>.json</code> path.</td>
     </tr>
     <tr>
       <td width="20%"><code>--help</code></td>
@@ -255,7 +245,7 @@ Boolean environment variables accept `true` or `false`, and `1` or `0`.
 
 ## Running on a Raspberry Pi
 
-On Linux, pico-bay checks `/proc/device-tree/model`. When the host is a Raspberry Pi, it listens on `0.0.0.0` by default so another computer on the same network can open it. It does not try to launch a browser on the Pi itself, and Streamable HTTP MCP is enabled at `/mcp` by default. Start with `--no-mcp` to disable MCP while keeping the web interface available.
+On Linux, pico-bay checks `/proc/device-tree/model`. When the host is a Raspberry Pi, it listens on `0.0.0.0` by default so another computer on the same network can open it. It does not try to launch a browser on the Pi itself, and Streamable HTTP MCP is enabled at `/mcp` by default. Start with `--mcp off` to disable MCP while keeping the web interface available.
 
 Several USB-connected boards may require a powered USB hub and a reliable Raspberry Pi power supply. MicroPython usually uses slightly less power because it exposes only serial; CircuitPython also exposes storage and HID. After an undervoltage event, pico-bay warns that USB may have stopped; fix the power issue and reboot the Pi.
 

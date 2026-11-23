@@ -9,6 +9,9 @@ const zlib = require('node:zlib');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const viewer = require('../pico-bay.js');
+// The MCP key file the HTTP tests use, never the real ~/.ctrlpi/pico-bay-config.json.
+const MCP_CONFIG_FILE = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pico-bay-mcp-')), 'pico-bay-config.json');
+const DEFAULT_KEY = { 'Api-Key': 'your-mcp-key' };
 
 function makeZipEntry(name, content, deflate = false) {
   const nameBuf = Buffer.from(name);
@@ -795,6 +798,25 @@ describe('pure helpers', () => {
     assert.deepEqual(viewer.selectMcpTransports({
       ...defaults, raspberryPiHost: true, noMcp: true,
     }), { stdio: false, http: false });
+  });
+
+
+  test('--ui and --mcp pick the mode, and old flags are ignored', () => {
+    const m = (argv, env = {}) => viewer.parseMode(argv, env);
+    assert.deepEqual([m([]).ui, m([]).mcp, m([]).given], [null, null, false]);
+    assert.deepEqual([m(['--ui', 'off']).mcp, m(['--ui', 'off']).uiOff], ['http', true]);
+    assert.equal(m(['--mcp', 'stdio']).ui, null);
+    assert.equal(m(['--mcp', 'http']).given, true);
+    assert.equal(m(['--ui', 'on']).given, true);
+    assert.equal(m([], { PICO_MCP: 'off' }).mcp, 'off');
+    assert.equal(m(['--mcp', 'http'], { PICO_MCP: 'off' }).mcp, 'http');
+    assert.ok(m(['--ui', 'off', '--mcp', 'off']).error);
+    assert.ok(m(['--ui', 'on', '--mcp', 'stdio']).error);
+    assert.ok(m(['--mcp', 'bogus']).error);
+    assert.ok(m(['--ui']).error);
+    for (const old of ['--mcp-only', '--mcp-http', '--mcp-stdio', '--no-mcp']) {
+      assert.equal(m([old]).given, false, old);
+    }
   });
 
   test('recognizes Raspberry Pi undervoltage warnings', () => {
@@ -1738,6 +1760,7 @@ describe('mocked HTTP API', () => {
       logDevices: false,
       logErrors: false,
       mcpHttp: true,
+      configFile: MCP_CONFIG_FILE,
       installBootsel: async (dev, firmware, _download, progress) => {
         progress({ stage: 'validating', percent: 0 });
         await new Promise(resolve => { finishBootselInstall = resolve; });
@@ -1933,7 +1956,7 @@ describe('mocked HTTP API', () => {
   test('logs background installation failures once while HTTP MCP remains quiet', async () => {
     const lines = [];
     const local = viewer.createServer({
-      logDevices: false, mcpHttp: true, errorLogger: line => lines.push(line),
+      logDevices: false, mcpHttp: true, configFile: MCP_CONFIG_FILE, errorLogger: line => lines.push(line),
       installEsp: async (_dev, _download, progress) => {
         progress({ stage: 'writing', percent: 12 });
         throw new Error('ESP ROM rejected command 0x03 (error 0x05)');
@@ -1951,7 +1974,7 @@ describe('mocked HTTP API', () => {
       }
       assert.equal(lines.length, 1);
       assert.match(lines[0], /ESP32 installation \(writing\) failed: .*\/dev\/test-micropython.*command 0x03/);
-      await fetch(url + '/mcp', { method: 'POST', body: '{' });
+      await fetch(url + '/mcp', { method: 'POST', headers: DEFAULT_KEY, body: '{' });
       assert.equal(lines.length, 1, 'MCP failures do not add terminal logs');
     } finally {
       await new Promise(resolve => local.close(resolve));
@@ -2223,6 +2246,7 @@ describe('mocked HTTP API', () => {
         'Content-Type': 'application/json',
         'MCP-Protocol-Version': '2026-07-28',
         'Mcp-Method': 'server/discover',
+        ...DEFAULT_KEY,
       },
       body: JSON.stringify(message),
     });
@@ -2234,7 +2258,7 @@ describe('mocked HTTP API', () => {
   test('supports legacy MCP and rejects invalid HTTP origins and methods', async () => {
     const legacy = await fetch(baseUrl + '/mcp', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...DEFAULT_KEY },
       body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/list', params: {} }),
     });
     assert.equal(legacy.status, 200);
@@ -2258,7 +2282,7 @@ describe('mocked HTTP API', () => {
 
     const unavailable = await fetch(baseUrl + '/mcp', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...DEFAULT_KEY },
       body: JSON.stringify({ jsonrpc: '2.0', id: 23, method: 'ping' }),
     });
     assert.equal(unavailable.status, 404);
@@ -2269,10 +2293,118 @@ describe('mocked HTTP API', () => {
 
     const available = await fetch(baseUrl + '/mcp', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...DEFAULT_KEY },
       body: JSON.stringify({ jsonrpc: '2.0', id: 24, method: 'ping' }),
     });
     assert.equal(available.status, 200);
+  });
+});
+
+describe('MCP key, /hello, /remote-config and --mcp-only', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pico-bay-remote-'));
+  const configFile = path.join(dir, 'pico-bay-config.json');
+  const servers = [];
+  const ping = { jsonrpc: '2.0', id: 1, method: 'ping' };
+
+  async function start(options) {
+    const server = viewer.createServer({ logDevices: false, logErrors: false, configFile, ...options });
+    servers.push(server);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return 'http://127.0.0.1:' + server.address().port;
+  }
+  const mcp = (url, key, body = ping) => fetch(url + '/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(key === undefined ? {} : { 'Api-Key': key }) },
+    body: JSON.stringify(body),
+  });
+  const remoteConfig = (url, key, body, headers = {}) => fetch(url + '/remote-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(key === undefined ? {} : { 'Api-Key': key }), ...headers },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+  const hello = async url => (await fetch(url + '/hello')).json();
+
+  after(async () => {
+    for (const server of servers) await new Promise(resolve => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('/hello answers without a key, and only GET', async () => {
+    const url = await start({ mcpHttp: true });
+    assert.deepEqual(await hello(url), { service: 'pico-bay', key: false });
+    assert.equal((await fetch(url + '/hello', { method: 'POST' })).status, 405);
+    assert.equal(fs.existsSync(configFile), false, '/hello never claims a key');
+  });
+
+  test('/mcp needs the key, and the first different key claims it', async () => {
+    const url = await start({ mcpHttp: true });
+    assert.equal((await mcp(url)).status, 403);
+    assert.equal((await mcp(url, 'your-mcp-key')).status, 200);
+    assert.equal(fs.existsSync(configFile), false, 'the default key claims nothing');
+    // /remote-config never claims a key.
+    assert.equal((await remoteConfig(url, 'grab', { api_key: 'other' })).status, 403);
+    assert.equal((await mcp(url, 'first-key')).status, 200);
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8')).mcp;
+    assert.equal(saved.api_key, 'first-key');
+    assert.match(saved.key_set, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    assert.deepEqual(await hello(url), { service: 'pico-bay', key: true });
+    assert.equal((await mcp(url, 'your-mcp-key')).status, 403);
+    assert.equal((await mcp(url, 'second-key')).status, 403);
+    assert.equal((await mcp(url, 'first-key')).status, 200);
+  });
+
+  test('/remote-config changes the key with the current one', async () => {
+    const url = await start({ mcpHttp: true });
+    assert.equal((await remoteConfig(url, 'wrong', { api_key: 'new-key' })).status, 403);
+    assert.equal((await remoteConfig(url, undefined, { api_key: 'new-key' })).status, 403);
+    assert.equal((await remoteConfig(url, 'first-key', { api_key: 'new-key' }, { Origin: 'https://evil.example' })).status, 403);
+    for (const body of [{}, { api_key: '' }, { api_key: 'your-mcp-key' }, { api_key: 'has space' }, { api_key: 'x'.repeat(129) }, { api_key: 42 }, 'not json']) {
+      assert.equal((await remoteConfig(url, 'first-key', body)).status, 400, JSON.stringify(body));
+    }
+    assert.equal((await fetch(url + '/remote-config', { headers: { 'Api-Key': 'first-key' } })).status, 405);
+    const changed = await remoteConfig(url, 'first-key', { api_key: 'new-key' });
+    assert.equal(changed.status, 200);
+    assert.match((await changed.json()).key_set, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+    assert.equal((await mcp(url, 'first-key')).status, 403);
+    assert.equal((await mcp(url, 'new-key')).status, 200);
+  });
+
+  test('--ui off serves only /mcp, /hello and /remote-config, and pico_ui refuses', async () => {
+    const url = await start({ mcpOnly: true });
+    assert.equal((await mcp(url, 'new-key')).status, 200);
+    assert.equal((await fetch(url + '/hello')).status, 200);
+    for (const route of ['/', '/api/devices', '/api/readme', '/favicon.ico', '/LICENSE']) {
+      assert.equal((await fetch(url + route)).status, 404, route);
+    }
+    assert.equal((await fetch(url + '/api/mcp?enabled=0', { method: 'POST' })).status, 404);
+    const ui = await (await mcp(url, 'new-key', {
+      jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'pico_ui', arguments: {} },
+    })).json();
+    assert.equal(ui.result.isError, true);
+    assert.match(ui.result.content[0].text, /--ui off/);
+  });
+
+  test('--config takes a folder or the .json file itself, and needs a value', () => {
+    assert.equal(viewer.resolveConfigFile('/x/y'), path.resolve('/x/y/pico-bay-config.json'));
+    assert.equal(viewer.resolveConfigFile('/x/mine.json'), path.resolve('/x/mine.json'));
+    assert.equal(viewer.resolveConfigFile(null), path.join(os.homedir(), '.ctrlpi', 'pico-bay-config.json'));
+    for (const args of [['--config'], ['--config', '--no-open']]) {
+      const run = spawnSync(process.execPath, [path.join(PROJECT_DIR, 'pico-bay.js'), ...args], {
+        env: { ...process.env, HOME: dir }, encoding: 'utf8', timeout: 10000,
+      });
+      assert.equal(run.status, 2, args.join(' '));
+      assert.match(run.stderr, /--config needs/);
+    }
+  });
+
+  test('--ui off with --mcp off, or --ui on with --mcp stdio, exits with code 2', () => {
+    for (const flags of [['--ui', 'off', '--mcp', 'off'], ['--ui', 'on', '--mcp', 'stdio'], ['--mcp', 'bogus']]) {
+      const run = spawnSync(process.execPath, [path.join(PROJECT_DIR, 'pico-bay.js'), ...flags], {
+        env: { ...process.env, HOME: dir }, encoding: 'utf8', timeout: 10000,
+      });
+      assert.equal(run.status, 2, flags.join(' '));
+      assert.match(run.stderr, /--ui|--mcp/);
+    }
   });
 });
 
@@ -2513,7 +2645,7 @@ describe('console serial lifecycle', () => {
 
 describe('MCP stdio process', () => {
   test('writes only JSON-RPC messages to stdout', async () => {
-    const child = spawn(process.execPath, ['pico-bay.js', '--mcp-stdio'], {
+    const child = spawn(process.execPath, ['pico-bay.js', '--mcp', 'stdio'], {
       cwd: PROJECT_DIR,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -2545,9 +2677,8 @@ describe('MCP stdio process', () => {
 
   test('starts without a flag when an MCP client talks on stdin', async () => {
     const env = { ...process.env, PICO_NO_OPEN: '1' };
-    delete env.PICO_MCP_STDIO;
-    delete env.PICO_MCP_HTTP;
-    delete env.PICO_NO_MCP;
+    delete env.PICO_UI;
+    delete env.PICO_MCP;
     const child = spawn(process.execPath, ['pico-bay.js'], {
       cwd: PROJECT_DIR, env, stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -2646,7 +2777,7 @@ describe('pico_ui', () => {
   test('serves the UI from a stdio MCP process', async () => {
     const env = { ...process.env };
     delete env.SSH_CONNECTION;
-    const child = spawn(process.execPath, ['pico-bay.js', '--mcp-stdio', '--port', '0', '--no-open'], {
+    const child = spawn(process.execPath, ['pico-bay.js', '--mcp', 'stdio', '--port', '0', '--no-open'], {
       cwd: PROJECT_DIR, env, stdio: ['pipe', 'pipe', 'pipe'],
     });
     try {
